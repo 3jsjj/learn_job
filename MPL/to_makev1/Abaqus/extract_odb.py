@@ -5,11 +5,10 @@
 2. 9 个传感器点的 CPRESS；
 3. 保存单工况 CSV。
 
-运行方式：
-    abaqus python extract_odb.py -- odb_path output_dir case_name side depth
+兼容 Abaqus Python 2 和 Python 3。
 
-注意：
-本脚本必须使用 Abaqus 自带 Python 运行。
+运行方式：
+    abaqus python extract_odb.py odb_path output_dir case_name side area depth
 """
 
 from __future__ import print_function
@@ -22,6 +21,15 @@ import sys
 from odbAccess import openOdb
 
 import config
+
+
+PY2 = sys.version_info[0] == 2
+
+
+def open_csv_write(path):
+    if PY2:
+        return open(path, "wb")
+    return open(path, "w", newline="")
 
 
 def norm_name(name):
@@ -44,8 +52,6 @@ def find_instance(assembly, expected_name):
 
 
 def find_cpress_field(frame):
-    # 不同 Abaqus 版本/接触定义下，键名可能不是严格的 "CPRESS"。
-    # 因此优先精确匹配，再搜索包含 CPRESS 的字段。
     if "CPRESS" in frame.fieldOutputs:
         return frame.fieldOutputs["CPRESS"], "CPRESS"
 
@@ -62,7 +68,6 @@ def find_cpress_field(frame):
             )
         )
 
-    # 选择值数量最多的 CPRESS 字段。
     best_key = None
     best_count = -1
 
@@ -76,13 +81,6 @@ def find_cpress_field(frame):
 
 
 def get_top_grid_nodes(instance):
-    """
-    返回按 MATLAB X_grid(:), Y_grid(:) 顺序排列的 441 个顶部节点。
-
-    顺序：
-    (0,0),(0,1),...,(0,20),
-    (1,0),(1,1),...,(20,20)
-    """
     coord_map = {}
 
     for node in instance.nodes:
@@ -116,6 +114,7 @@ def get_top_grid_nodes(instance):
         )
 
     ordered = []
+
     for x, y in expected:
         ordered.append(
             {
@@ -129,11 +128,6 @@ def get_top_grid_nodes(instance):
 
 
 def extract_nodal_cpress(field, deformable_instance_name):
-    """
-    将 CPRESS 值整理为 nodeLabel -> 平均压力。
-
-    若同一节点存在多个值，则取平均。
-    """
     target = norm_name(deformable_instance_name)
     sums = {}
     counts = {}
@@ -149,11 +143,11 @@ def extract_nodal_cpress(field, deformable_instance_name):
                 continue
 
         label = value.nodeLabel
-
         data = value.data
+
         try:
             pressure = float(data)
-        except TypeError:
+        except (TypeError, ValueError):
             pressure = float(data[0])
 
         sums[label] = sums.get(label, 0.0) + pressure
@@ -193,10 +187,13 @@ def nearest_grid_value(grid_rows, x_target, y_target):
 
 
 def write_single_row_csv(path, header, row):
-    with open(path, "w", newline="") as f:
+    f = open_csv_write(path)
+    try:
         writer = csv.writer(f)
         writer.writerow(header)
         writer.writerow(row)
+    finally:
+        f.close()
 
 
 def main():
@@ -208,8 +205,9 @@ def main():
     if len(args) != 6:
         raise RuntimeError(
             "参数数量错误。\n"
-            "用法：abaqus python extract_odb.py -- "
-            "odb_path output_dir case_name side_length area depth"
+            "实际参数：{}\n"
+            "用法：abaqus python extract_odb.py "
+            "odb_path output_dir case_name side_length area depth".format(args)
         )
 
     odb_path = os.path.abspath(args[0])
@@ -219,8 +217,21 @@ def main():
     area = float(args[4])
     depth = float(args[5])
 
+    if not os.path.isfile(odb_path):
+        raise RuntimeError("ODB 不存在：{}".format(odb_path))
+
+    if os.path.getsize(odb_path) < 1024:
+        raise RuntimeError(
+            "ODB 文件过小，可能未正确生成：{}，大小={} bytes".format(
+                odb_path,
+                os.path.getsize(odb_path),
+            )
+        )
+
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
+
+    print("正在打开 ODB：{}".format(odb_path))
 
     odb = openOdb(odb_path, readOnly=True)
 
@@ -228,12 +239,14 @@ def main():
         if not odb.steps:
             raise RuntimeError("ODB 中没有分析步。")
 
-        # 使用最后一个分析步的最后一帧。
-        last_step_name = list(odb.steps.keys())[-1]
+        step_names = list(odb.steps.keys())
+        last_step_name = step_names[-1]
         step = odb.steps[last_step_name]
 
         if not step.frames:
-            raise RuntimeError("分析步 {} 中没有结果帧。".format(last_step_name))
+            raise RuntimeError(
+                "分析步 {} 中没有结果帧。".format(last_step_name)
+            )
 
         frame = step.frames[-1]
 
@@ -245,12 +258,20 @@ def main():
         )
 
         top_nodes = get_top_grid_nodes(instance)
+
         pressure_by_label = extract_nodal_cpress(
             cpress_field,
             config.DEFORMABLE_INSTANCE,
         )
 
-        # 未出现在 CPRESS 字段中的非接触节点视为 0。
+        if not pressure_by_label:
+            raise RuntimeError(
+                "找到了 CPRESS 字段，但没有提取到 {} 实例的节点压力值。"
+                "请检查 CPRESS 的输出位置和实例名称。".format(
+                    config.DEFORMABLE_INSTANCE
+                )
+            )
+
         for row in top_nodes:
             row["pressure"] = max(
                 0.0,
@@ -305,25 +326,20 @@ def main():
             depth,
         ] + grid_values
 
-        write_single_row_csv(
-            os.path.join(output_dir, case_name + "_X.csv"),
-            x_header,
-            x_row,
-        )
+        x_path = os.path.join(output_dir, case_name + "_X.csv")
+        y_path = os.path.join(output_dir, case_name + "_Y.csv")
+        meta_path = os.path.join(output_dir, case_name + "_meta.csv")
 
-        write_single_row_csv(
-            os.path.join(output_dir, case_name + "_Y.csv"),
-            y_header,
-            y_row,
-        )
+        write_single_row_csv(x_path, x_header, x_row)
+        write_single_row_csv(y_path, y_header, y_row)
 
-        # 保存坐标-压力长表，便于检查。
         long_path = os.path.join(
             output_dir,
             case_name + "_CPRESS_long.csv",
         )
 
-        with open(long_path, "w", newline="") as f:
+        f = open_csv_write(long_path)
+        try:
             writer = csv.writer(f)
             writer.writerow(
                 [
@@ -345,13 +361,11 @@ def main():
                         row["pressure"],
                     ]
                 )
+        finally:
+            f.close()
 
-        meta_path = os.path.join(
-            output_dir,
-            case_name + "_meta.csv",
-        )
-
-        with open(meta_path, "w", newline="") as f:
+        f = open_csv_write(meta_path)
+        try:
             writer = csv.writer(f)
             writer.writerow(
                 [
@@ -383,10 +397,19 @@ def main():
                     "success",
                 ]
             )
+        finally:
+            f.close()
+
+        # 最终强制检查结果文件。
+        for path in [x_path, y_path, meta_path]:
+            if not os.path.isfile(path):
+                raise RuntimeError("结果文件未生成：{}".format(path))
 
         print("提取成功：{}".format(case_name))
         print("CPRESS 字段：{}".format(cpress_key))
         print("最大 CPRESS：{}".format(max(grid_values)))
+        print("X 文件：{}".format(x_path))
+        print("Y 文件：{}".format(y_path))
 
     finally:
         odb.close()

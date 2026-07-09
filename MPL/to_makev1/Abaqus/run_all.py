@@ -1,23 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-一键批量运行脚本。
+一键批量运行脚本（修正版）。
 
-普通 Python 3 运行：
-    python run_all.py
-
-流程：
-1. 自动调用 generate_cases.py 生成全部 INP；
-2. 逐个调用 Abaqus 求解；
-3. 逐个调用 Abaqus Python 提取 ODB；
-4. 自动断点续跑；
-5. 合并 X_data.csv、Y_data.csv、metadata.csv。
+修正内容：
+1. 求解后检查 .sta 是否包含成功完成标志；
+2. 检查 ODB 是否存在且文件大小正常；
+3. 提取后检查 X/Y/meta 文件是否真实生成；
+4. 提取失败不再误报“工况完成”；
+5. 去掉部分 Abaqus 版本可能无法正确解析的 "--"。
 """
 
 from __future__ import print_function
 
 import csv
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -101,11 +97,11 @@ def extractor_command(
     area,
     depth,
 ):
+    # 不再添加 "--"，兼容更多 Abaqus Windows 版本。
     parts = [
         config.ABAQUS_COMMAND,
         "python",
         quote(os.path.abspath("extract_odb.py")),
-        "--",
         quote(os.path.abspath(odb_path)),
         quote(os.path.abspath(single_result_dir)),
         quote(case_name),
@@ -140,32 +136,72 @@ def append_status(path, row):
         writer.writerow(row)
 
 
-def cleanup_solver_files(case_dir, job_name):
-    extensions = [
-        ".odb",
-        ".dat",
-        ".msg",
-        ".sta",
-        ".com",
-        ".prt",
-        ".sim",
-        ".stt",
-        ".res",
-        ".mdl",
-        ".pac",
-        ".abq",
-        ".sel",
-        ".023",
+def check_sta_success(sta_path):
+    if not os.path.isfile(sta_path):
+        return False, "未生成 STA 文件：{}".format(sta_path)
+
+    with open(sta_path, "r", errors="ignore") as f:
+        text = f.read().upper()
+
+    success_markers = [
+        "THE ANALYSIS HAS COMPLETED SUCCESSFULLY",
+        "ANALYSIS COMPLETED SUCCESSFULLY",
     ]
 
-    for ext in extensions:
-        path = os.path.join(case_dir, job_name + ext)
+    for marker in success_markers:
+        if marker in text:
+            return True, ""
 
-        if os.path.isfile(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+    # 有些版本 STA 不写完整英文句子，但仍可能正常生成 ODB。
+    # 这里返回提示，由 ODB 大小检查继续判断。
+    return False, "STA 中未发现成功完成标志，请检查：{}".format(sta_path)
+
+
+def validate_odb(odb_path):
+    if not os.path.isfile(odb_path):
+        raise RuntimeError("没有生成 ODB：{}".format(odb_path))
+
+    size = os.path.getsize(odb_path)
+
+    if size < 1024:
+        raise RuntimeError(
+            "ODB 文件过小，可能无效：{}，大小={} bytes".format(
+                odb_path,
+                size,
+            )
+        )
+
+
+def validate_extracted_files(
+    single_result_dir,
+    case_name,
+):
+    required = [
+        os.path.join(
+            single_result_dir,
+            case_name + "_X.csv",
+        ),
+        os.path.join(
+            single_result_dir,
+            case_name + "_Y.csv",
+        ),
+        os.path.join(
+            single_result_dir,
+            case_name + "_meta.csv",
+        ),
+    ]
+
+    missing = [
+        path for path in required
+        if not os.path.isfile(path)
+    ]
+
+    if missing:
+        raise RuntimeError(
+            "ODB 提取命令结束，但结果文件未生成：{}".format(
+                missing
+            )
+        )
 
 
 def main():
@@ -197,9 +233,15 @@ def main():
         inp_name = os.path.basename(row["inp_path"])
 
         job_name = case_name
+
         odb_path = os.path.join(
             case_dir,
             job_name + ".odb",
+        )
+
+        sta_path = os.path.join(
+            case_dir,
+            job_name + ".sta",
         )
 
         x_result = os.path.join(
@@ -226,7 +268,6 @@ def main():
         )
         print("=" * 70)
 
-        # 已经提取成功则跳过，实现断点续跑。
         if os.path.isfile(x_result) and os.path.isfile(y_result):
             print("结果已存在，跳过：{}".format(case_name))
             continue
@@ -234,7 +275,6 @@ def main():
         start_time = time.time()
 
         try:
-            # 若已有 ODB，则直接提取，不重复求解。
             if not os.path.isfile(odb_path):
                 solver_log = os.path.join(
                     config.LOGS_DIR,
@@ -255,12 +295,13 @@ def main():
                         )
                     )
 
-                if not os.path.isfile(odb_path):
-                    raise RuntimeError(
-                        "求解结束但未生成 ODB：{}".format(
-                            odb_path
-                        )
-                    )
+            validate_odb(odb_path)
+
+            sta_ok, sta_message = check_sta_success(sta_path)
+
+            if not sta_ok:
+                print("警告：{}".format(sta_message))
+                print("将继续尝试打开 ODB 并提取结果。")
 
             extractor_log = os.path.join(
                 config.LOGS_DIR,
@@ -287,6 +328,11 @@ def main():
                     )
                 )
 
+            validate_extracted_files(
+                single_result_dir,
+                case_name,
+            )
+
             elapsed = time.time() - start_time
 
             append_status(
@@ -303,14 +349,11 @@ def main():
             )
 
             print(
-                "工况完成：{}，耗时 {:.1f} s".format(
+                "工况真正完成：{}，耗时 {:.1f} s".format(
                     case_name,
                     elapsed,
                 )
             )
-
-            if config.DELETE_SOLVER_FILES_AFTER_EXTRACTION:
-                cleanup_solver_files(case_dir, job_name)
 
         except Exception as exc:
             elapsed = time.time() - start_time
@@ -330,6 +373,7 @@ def main():
 
             print("工况失败：{}".format(case_name))
             print(str(exc))
+            print("请查看对应 solver.log 和 extract.log。")
             print("程序继续运行下一个工况。")
 
     return_code = subprocess.call(
@@ -342,7 +386,7 @@ def main():
     print("")
     print("=" * 70)
     print("批量仿真结束。")
-    print("输出文件：")
+    print("请检查：")
     print(
         os.path.join(
             config.RESULTS_DIR,
