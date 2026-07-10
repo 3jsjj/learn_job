@@ -85,7 +85,7 @@ end
 %
 % azimuth = 0°，elevation = 0°  对应 +x 方向；
 % azimuth = 90°，elevation = 0° 对应 +y 方向；
-% elevation = 90°                  对应 +z 方向。
+% elevation = 90°               对应 +z 方向。
 %
 % 当前示例假设所有真实测点的方向均沿 +z。
 % 如果每个测点具有不同方向，应逐行设置下面两个角度向量。
@@ -119,14 +119,14 @@ z = linspace(0, 10, 21);
 X_virtual = [xx(:), yy(:), zz(:)];
 
 %% 6. 设置三维虚拟点的方向向量
-% 当前假设所有虚拟点的局部方向也沿 +z。
+% 当前假设所有虚拟点的局部方向也。
 %
 % 若虚拟点方向随空间位置变化，需要分别构造：
 %   azimuth_virtual_deg
 %   elevation_virtual_deg
 
 num_virtual = size(X_virtual, 1);
-
+% 这里的方位角都市为 0°，仰角为 90°，即所有虚拟点方向均沿 +z。
 azimuth_virtual_deg   = zeros(num_virtual, 1);
 elevation_virtual_deg = 90 .* ones(num_virtual, 1);
 
