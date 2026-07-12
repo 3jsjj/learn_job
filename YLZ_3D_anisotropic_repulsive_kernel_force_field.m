@@ -441,7 +441,7 @@ function [F_pred, F_dispersion, K, W] = predictYLZField3D( ...
         error('N_query 和 N_meas 必须是三列三维方向向量 [nx,ny,nz]。');
     end
 
-    if size(X_query,1) ~= size(N_query,1)
+    if size(X_query,1) ~= siz*e(N_query,1)
         error('X_query 与 N_query 的行数必须一致。');
     end
 

@@ -17,23 +17,18 @@ coincide_tol 距离容差
 
 # 04 设置真实测点的三维方向向量
 
- 三维单位方向向量使用方位角 azimuth 和仰角 elevation 表示：
+% 单独一个坐标点不能唯一确定方向，因此需要指定方向参考点 O。
 %
-%   n_x = cos(elevation)*cos(azimuth)
-%   n_y = cos(elevation)*sin(azimuth)
-%   n_z = sin(elevation)
+% 当前采用径向方向模型：
 %
-% 角度单位均为 degree。
+%   n_t = (X_t - O)/||X_t - O||
 %
-% azimuth = 0°，elevation = 0°  对应 +x 方向；
-% azimuth = 90°，elevation = 0° 对应 +y 方向；
-% elevation = 90°               对应 +z 方向。
-%
-% 当前示例假设所有真实测点的方向均沿 +z。
-% 如果每个测点具有不同方向，应逐行设置下面两个角度向量。
+% 这里把方向参考点放在测点几何中心下方。
+% direction_origin_depth 应根据实际结构中的等效方向中心进行调整
 
-第一次用到 **directionFromAzEl** 函数
-输入点的方位角和仰角，得到点的坐标的数据
+ **这里我要改的，我觉得参考点应该是可以在(0,0,0)的，等我看完所有的code就改** 
+ 有一个取参考点的过程，我试试不同的参考点的值会有什么影响
+
 
 
 # 05 创建三维连续预测网格
@@ -41,36 +36,50 @@ coincide_tol 距离容差
 
 # 06 设置三维虚拟点的方向向量
 
-**这一步建立的是一个方位角和仰角只有两种值得数据(0,90),得到的单位1方向向量都是(0，0，1)**
-如果要建立统一的参考点，就用参考系的原点没问题
+这里和04一致
+
+# 7. 使用“虚拟点 -> neighbors -> 真实点”的双层循环预测
+% 外层循环：
+%   逐个处理虚拟点 q。
+%
+% 内层循环：
+%   只处理三维直线距离 r < r_c 的真实邻居 j。
+%
+% 函数内部会明确计算：
+%   n_v、n_t、h_tv、r、r_hat、u_R、a、phi、K_qj，
+% 然后再对当前虚拟点的全部邻居进行归一化加权。
 
 
-到这一步，下面的关键参数分别是什么
+## 预测函数 predictYLZField3DNeighbors
+### info
+输入是：虚拟点的坐标、单位方向向量，真实测点的坐标、单位方向向量还有测量值，YLZ势函数所需的参数
+
+输出：F_pred, F_dispersion, K, W, NeighborList, GeometricNeighborCount, ActiveKernelCount
+
+局部加权离散散度：F_dispersion
+![alt text](image.png)
+
+完整核值矩阵：K, 
 
 
-N_meas
+归一化权重矩阵：W, 
+![alt text](image-1.png)
 
-N_virtual 
+NeighborList, 
 
-##
-for q = 1:num_query
+GeometricNeighborCount, 查询点的几何邻居数量
 
-    % 1. 计算当前虚拟点到所有真实测点的三维直线距离
+ActiveKernelCount 查询点实际有效的核数量
 
-    % 2. 筛选距离小于 r_c 的 neighbors
+### 输入检查
 
-    % 3. loop 遍历 neighbors
-    %    分别计算 YLZ 径向项、方向项和完整核值
-    (计算的过程，代码里用的是n_v和n_t,还有求rhat的过程呢，求完a的过程呢，求phi的过程，都要在代码中看到)
-
-    % 4. 对所有邻居贡献进行归一化加权
-    %    得到当前虚拟点的预测力
-
-end
+### 预处理 
+    归一化三维方向向量
 
 
 
+### 外层循环：逐个虚拟点进行预测
 
-# **directionFromAzEl** 函数
-   输入点的方位角和仰角，得到点的坐标的数据
-   将方位角和仰角转换为三维单位方向向量
+
+
+### 输入检查
