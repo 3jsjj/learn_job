@@ -2,7 +2,7 @@
 #
 # Abaqus/CAE Release 2025 replay file
 # Internal Version: 2024_09_20-21.00.46 RELr427 198590
-# Run by 13104 on Wed Jul 15 19:19:08 2026
+# Run by 13104 on Wed Jul 15 20:49:20 2026
 #
 
 # from driverUtils import executeOnCaeGraphicsStartup
@@ -15,7 +15,7 @@ session.Viewport(name='Viewport: 1', origin=(1.16602, 1.16667), width=171.637,
 session.viewports['Viewport: 1'].makeCurrent()
 from driverUtils import executeOnCaeStartup
 executeOnCaeStartup()
-execfile('./get_pressure.py', __main__.__dict__)
+execfile('./get_fixed.py', __main__.__dict__)
 #: Model: D:/test/pressure-2.odb
 #: Number of Assemblies:         1
 #: Number of Assembly instances: 0
@@ -24,6 +24,6 @@ execfile('./get_pressure.py', __main__.__dict__)
 #: Number of Element Sets:       1
 #: Number of Node Sets:          1
 #: Number of Steps:              1
-#: ???????????: Abaqus_Nodal_U_and_Pressure.csv
+#: ????? 160 ??????????: fixed_nodes.csv
 print('RT script done')
 #: RT script done

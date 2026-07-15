@@ -1,0 +1,138 @@
+% =========================================================================
+% 纯净版逆有限元 (Inverse FEM) + 力场重构框架 (基于真实输入)
+% =========================================================================
+clear; clc;
+
+%% 1. 用户数据输入区 (请替换以下占位符)
+
+% --- A. 模型基础信息 ---
+% 导入所有节点的坐标矩阵，维度为 [N_nodes, 2] (2D) 或 [N_nodes, 3] (3D)
+inp_filepath='element_nodes_2.inp';
+[node_ids, node_coords] = get_model(inp_filepath);
+% 导入处理过边界条件后的全局刚度矩阵 K (建议为 sparse 稀疏矩阵格式)
+% 2. 导入并组装 Abaqus 刚度矩阵 (处理 5 列的节点-自由度格式)
+mtx_data = load('get_matrix-3_STIF2.mtx'); 
+
+% 拆解 Abaqus 的 5 列数据: [Node_I, DOF_I, Node_J, DOF_J, Value]
+node_i = mtx_data(:, 1);
+dof_i  = mtx_data(:, 2);
+node_j = mtx_data(:, 3);
+dof_j  = mtx_data(:, 4);
+values = mtx_data(:, 5);
+
+% 将“节点ID + 自由度方向”映射为矩阵的绝对行/列索引
+% 这里的 3 代表 3D 实体单元(Solid)每个节点有 3 个平动自由度(U1, U2, U3)
+% （如果你在这层薄膜模型里用的是壳单元 Shell，请把这里的 3 改成 6）
+num_dofs_per_node = 3; 
+row_idx = num_dofs_per_node * (node_i - 1) + dof_i;
+col_idx = num_dofs_per_node * (node_j - 1) + dof_j;
+
+% 获取模型最大的自由度编号，以确定矩阵的绝对尺寸
+max_dof = max(max(row_idx), max(col_idx));
+
+% 直接使用 sparse 函数构建稀疏矩阵 (它比 spconvert 更灵活且自动累加重复项)
+K_half = sparse(row_idx, col_idx, values, max_dof, max_dof);
+
+% Abaqus 默认只输出对称矩阵的下三角/上三角，需补全为完整的对称矩阵
+K_raw = K_half + K_half' - diag(diag(K_half));
+
+
+% --- B. 真实测点输入 ---
+% 读取你在 Abaqus 提取的测点位移结果文件
+measured_results = readmatrix('Abaqus_Nodal_U_and_Pressure.csv');
+id_measured = measured_results(:, 1); % 第一列是测点 ID
+
+% 提取 U1, U2, U3 位移矩阵，并展平为一维列向量 [U1_x; U1_y; U1_z; U2_x; ...]
+U_measured_mat = measured_results(:, 2:4); 
+U_measured = reshape(U_measured_mat', [], 1); 
+
+% 假设测点本身没有承受已知的集中外力干扰
+F_measured = measured_results(:, 2:4); 
+
+
+% --- C. 虚拟位点输入 ---
+% 输入需要推演力的虚拟位点坐标，维度为 [N_virtual, 2] 或 [N_virtual, 3]
+coords_virtual = node_coords; 
+
+% 正则化参数 (根据位移数据的信噪比调整。无噪音填0，有噪音尝试 1e-6 ~ 1e-2)
+lambda = 1e-6; 
+
+
+%%
+% 3. 施加边界条件消除奇异性 (这一步不可省略！)
+% 【请修改】：填入你在 Abaqus 中被完全固定的节点 ID
+fixed_nodes = [1, 2, 3]; 
+constrained_dofs = [];
+for n = fixed_nodes
+    % 3D 实体模型每个节点有 3 个自由度 (U1, U2, U3)
+    constrained_dofs = [constrained_dofs, 3*n-2, 3*n-1, 3*n]; 
+end
+
+% 找出消除约束后剩下的活动自由度
+all_dofs = 1:size(K_raw, 1);
+active_dofs = setdiff(all_dofs, constrained_dofs);
+
+% 提取最终可计算的非奇异全局刚度矩阵
+K_global = K_raw(active_dofs, active_dofs);
+
+
+
+%% 2. 节点 ID 到矩阵自由度 (DOF) 的精确映射
+% 废弃空间距离搜索，直接利用 Abaqus 的原生 Node ID 进行 3D 自由度展开。
+% 规则：在 3D 实体模型中，节点 i 的全局自由度为 [3*i-2 (X), 3*i-1 (Y), 3*i (Z)]。
+
+% 构造一个映射函数：将 3D 的全局 DOF 转换为消除边界约束后的有效自由度 (active_dofs) 索引
+get_active_dofs = @(ids) find(ismember(active_dofs, reshape([3*ids-2, 3*ids-1, 3*ids]', 1, [])));
+
+% 精确获取测点和虚拟点在 K_global 矩阵中真实的行/列索引
+dof_measured = get_active_dofs(id_measured);
+dof_virtual  = get_active_dofs(id_virtual);
+
+
+%% 3. 高效构建灵敏度矩阵 (避免全矩阵求逆)
+N_total_dof = size(K_global, 1);
+N_virtual_dof = length(dof_virtual);
+
+% 构造虚拟节点位置的单位力载荷矩阵 (稀疏矩阵)
+% 列数为虚拟节点的数量，每列代表在一个虚拟节点施加单位力
+F_unit_virtual = sparse(dof_virtual, 1:N_virtual_dof, 1, N_total_dof, N_virtual_dof);
+
+% 直接求解全局系统得到对应的位移场 (即柔度矩阵中与虚拟节点相关的列)
+% K * C_col = F_unit  =>  C_col = K \ F_unit
+C_virtual_cols = K_global \ F_unit_virtual;
+
+% 提取灵敏度观测矩阵 H (仅提取测点自由度所在行的位移响应)
+H = C_virtual_cols(dof_measured, :);
+
+
+%% 4. 计算测点已知力产生的基准位移 (如果有)
+if any(F_measured)
+    % 与上面同理，计算测点已知力在全场产生的位移
+    F_unit_measured = sparse(dof_measured, 1:length(dof_measured), F_measured, N_total_dof, 1);
+    U_from_F_measured_full = K_global \ F_unit_measured;
+    U_from_F_measured = U_from_F_measured_full(dof_measured);
+else
+    U_from_F_measured = zeros(size(U_measured));
+end
+
+
+%% 5. Tikhonov 正则化求解虚拟节点力场
+% 计算需要由“虚拟力”来弥补的位移残差
+Delta_U = U_measured - U_from_F_measured;
+
+% 构建单位矩阵用于正则化惩罚项
+I_reg = eye(N_virtual_dof);
+
+% 核心求解公式: F_v = inv(H'*H + lambda*I) * H' * Delta_U
+F_virtual_reconstructed = (H' * H + lambda * I_reg) \ (H' * Delta_U);
+
+
+%% 6. 结果输出
+disp('========================================');
+disp('          虚拟位点力场重构完成');
+disp('========================================');
+for i = 1:N_virtual_dof
+    fprintf('虚拟坐标 [%s] (匹配节点/DOF ID: %d):\n', num2str(coords_virtual(i,:)), dof_virtual(i));
+    fprintf('  -> 推演受力: %g\n', F_virtual_reconstructed(i));
+    disp('----------------------------------------');
+end
