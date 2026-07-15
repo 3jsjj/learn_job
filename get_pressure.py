@@ -5,7 +5,7 @@ import visualization
 import sys
 
 # === 用户设置区 ===
-odb_name = 'your_job_name.odb'  # 替换为你的 odb 文件名
+odb_name = 'pressure-2.odb'  # 替换为你的 odb 文件名
 step_name = 'Step-1'            # 替换为你要提取的分析步
 frame_index = -1                # -1 表示提取最后一帧 (平衡状态)
 
