@@ -73,10 +73,14 @@ for n = fixed_nodes
     constrained_dofs = [constrained_dofs, 3*n-2, 3*n-1, 3*n]; 
 end
 
-% 找出消除约束后剩下的活动自由度
-all_dofs = 1:size(K_raw, 1);
-active_dofs = setdiff(all_dofs, constrained_dofs);
+% =========================================================
+% 【核心修复】：找出矩阵中真正有刚度数值的物理自由度
+% 这一步直接剔除了所有因为 Abaqus 节点 ID 跳跃而产生的全 0 幽灵空行
+existing_dofs = unique([row_idx; col_idx]); 
 
+% 在真实存在的自由度中，进一步扣除被固定的边界自由度
+active_dofs = setdiff(existing_dofs, constrained_dofs);
+% =========================================================
 % 提取最终可计算的非奇异全局刚度矩阵
 K_global = K_raw(active_dofs, active_dofs);
 
@@ -153,6 +157,34 @@ else
     U_from_F_measured = zeros(size(U_measured));
 end
 
+%%
+% =========================================================================
+% 🚑 救命诊断探针 (运行健康检查)
+% =========================================================================
+disp(' ');
+disp('====== 🚑 矩阵健康状态诊断 ======');
+fprintf('1. 识别到的固定端节点数量: %d 个\n', length(fixed_nodes));
+
+if length(fixed_nodes) == 0
+    warning('致命错误：固定节点数量为 0！刚度矩阵将无法求逆，必然产生 NaN。');
+end
+
+fprintf('2. 测点位移 (U_measured) 是否含 NaN: %s\n', mat2str(any(isnan(U_measured))));
+fprintf('3. 全局刚度矩阵 (K_global) 是否含 NaN: %s\n', mat2str(any(isnan(K_global), 'all')));
+
+% condest 用于估算稀疏矩阵的条件数。如果 > 1e15，说明矩阵严重奇异（存在刚体位移）
+cond_K = condest(K_global);
+fprintf('4. K_global 矩阵条件数估算: %e\n', cond_K);
+if cond_K > 1e15
+    warning('致命错误：全局刚度矩阵严重奇异 (条件数极大)！边界条件未有效约束刚体位移。');
+end
+
+fprintf('5. 灵敏度矩阵 (H) 是否含 NaN: %s\n', mat2str(any(isnan(H), 'all')));
+disp('=================================');
+disp(' ');
+
+
+
 
 %% 5. Tikhonov 正则化求解虚拟节点力场
 % 计算需要由“虚拟力”来弥补的位移残差
@@ -193,3 +225,64 @@ if N_valid_nodes > 20
     fprintf('\n... (省略其余 %d 个节点的输出)\n', N_valid_nodes - 20);
     disp('*** 全部推演受力数据已结构化保存在 F_nodes_3D 矩阵中，可用于后续云图绘制。 ***');
 end
+
+%% 7. 高清三维力场云图可视化 (全模型对比版)
+disp('正在渲染全景三维力场云图...');
+
+% 1. 提取虚拟节点的坐标数据 (用于彩色映射)
+X_virt = coords_virtual_valid(:, 1);
+Y_virt = coords_virtual_valid(:, 2);
+Z_virt = coords_virtual_valid(:, 3);
+
+% 2. 提取固定节点的坐标数据 (用于绘制灰色基座轮廓，补全模型)
+[~, loc_fixed] = ismember(fixed_nodes, node_ids);
+coords_fixed = node_coords(loc_fixed, :);
+
+% 3. 选择你要映射为颜色的物理量 (Z方向法向力)
+Color_Data = F_nodes_3D(:, 3); 
+
+% 4. 创建绘图窗口
+figure('Name', '全模型逆向受力云图', 'Color', 'w', 'Position', [100, 100, 850, 650]);
+hold on; grid on;
+
+% =======================================================
+% 核心画图逻辑：分层渲染
+% =======================================================
+
+% 第一层：画出被固定的节点 (使用灰色小点，作为几何边界对照)
+if ~isempty(coords_fixed)
+    scatter3(coords_fixed(:,1), coords_fixed(:,2), coords_fixed(:,3), ...
+             15, [0.7 0.7 0.7], 'filled', 'MarkerEdgeColor', 'none', ...
+             'DisplayName', '固定端边界');
+end
+
+% 第二层：画出推演出受力的虚拟节点 (使用彩色大点，展示应力梯度)
+scatter3(X_virt, Y_virt, Z_virt, ...
+         40, Color_Data, 'filled', 'MarkerEdgeColor', 'none', ...
+         'DisplayName', '推演受力点');
+
+% =======================================================
+
+% 5. 视角与坐标轴美化
+view(45, 30);            
+axis equal;              
+xlabel('X 坐标 (mm)', 'FontSize', 12, 'FontWeight', 'bold');
+ylabel('Y 坐标 (mm)', 'FontSize', 12, 'FontWeight', 'bold');
+zlabel('Z 坐标 (mm)', 'FontSize', 12, 'FontWeight', 'bold');
+title('多层薄膜全模型三维力场云图', 'FontSize', 15, 'FontWeight', 'bold');
+
+% 6. 渲染器与色彩映射配置
+set(gcf, 'Renderer', 'painters'); 
+colormap('jet');                  
+cb = colorbar;                    
+ylabel(cb, '重构节点法向力 (N)', 'FontSize', 12, 'FontWeight', 'bold');
+
+% 对称化颜色条 (让受压和受拉的颜色对比更强烈)
+c_max = max(abs(Color_Data));
+if c_max > 0
+    caxis([-c_max, c_max]); 
+end
+
+legend('Location', 'best');
+hold off;
+disp('云图渲染完成！现在你可以看到整个模型的完整轮廓了。');
