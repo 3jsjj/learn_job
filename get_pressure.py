@@ -12,7 +12,6 @@ frame_index = -1                # -1 表示提取最后一帧 (平衡状态)
 # 需要提取数据的目标节点 ID 列表
 target_nodes = (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)
 # ==================
-
 # 1. 打开 ODB 文件
 try:
     myOdb = visualization.openOdb(path=odb_name)
@@ -25,24 +24,33 @@ lastFrame = myOdb.steps[step_name].frames[frame_index]
 # 2. 提取位移场 (直接基于节点)
 uField = lastFrame.fieldOutputs['U']
 
-# 3. 提取应力场，并获取等效静水压应力不变量 (Press)，同时外推至节点位置 (ELEMENT_NODAL)
+# 3. 提取应力场，并外推至节点位置 (ELEMENT_NODAL)
 try:
     sField = lastFrame.fieldOutputs['S']
-    # PRESS 是 Abaqus 内置的不变量常量，代表 -1/3 * trace(Sigma)
-    pressField = sField.getScalarFromInvariant(invariant=PRESS, position=ELEMENT_NODAL)
+    sField_nodal = sField.getSubset(position=ELEMENT_NODAL)
 except KeyError:
     print("错误: ODB 文件中没有找到应力 (S) 数据，请检查 Step 模块中的 Field Output Requests。")
     sys.exit()
 
-# 4. 由于节点处存在多单元共享，建立字典进行压力的节点多值平均
+# 4. 建立字典进行压力的手动计算与多值平均
 node_press_data = {}  # 格式为 {node_id: [press_val1, press_val2, ...]}
 
-for p_value in pressField.values:
+# 遍历外推到节点上的应力场
+for p_value in sField_nodal.values:
     node_id = p_value.nodeLabel
     if node_id in target_nodes:
         if node_id not in node_press_data:
             node_press_data[node_id] = []
-        node_press_data[node_id].append(p_value.data)
+        
+        # 提取应力张量的前三个正应力分量：S11, S22, S33
+        # p_value.data 是一个包含多个分量的 tuple，前三个固定是正应力
+        s11 = p_value.data[0]
+        s22 = p_value.data[1]
+        s33 = p_value.data[2]
+        
+        # 手动计算静水压应力: P = -(S11 + S22 + S33) / 3.0
+        press = -(s11 + s22 + s33) / 3.0
+        node_press_data[node_id].append(press)
 
 # 计算每个节点的平均压力
 node_press_avg = {}
