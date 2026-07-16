@@ -208,7 +208,11 @@ virtual_coords    = virtual_coords(valid_virtual_surface, :);
 
 %% 6. 读取并组装 Abaqus 刚度矩阵
 
-mtx_data = readmatrix(mtx_filepath);
+try
+    mtx_data = readmatrix(mtx_filepath, 'FileType', 'text');
+catch
+    mtx_data = load(mtx_filepath);
+end
 mtx_data = mtx_data(all(isfinite(mtx_data), 2), :);
 
 if size(mtx_data, 2) < 5
