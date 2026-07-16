@@ -87,7 +87,7 @@ dof_j  = mtx_data(:, 4);
 values = mtx_data(:, 5);
 
 % 将“节点编号 + 节点内自由度编号”映射为全局自由度编号。
-% 对于节点 n：
+% 对于节点 n：(节点三个自由度方向的求全局的自由度编号)
 %   U1 -> 3*n-2
 %   U2 -> 3*n-1
 %   U3 -> 3*n
@@ -95,6 +95,7 @@ row_idx = num_dofs_per_node * (node_i - 1) + dof_i;
 col_idx = num_dofs_per_node * (node_j - 1) + dof_j;
 
 % 检查节点内自由度编号是否与三维实体假设一致。
+% 意思是这里面的自由度编号必须在 1~3 之间，否则说明刚度矩阵可能来自壳单元或其他类型单元。
 if any(dof_i < 1 | dof_i > num_dofs_per_node) || ...
    any(dof_j < 1 | dof_j > num_dofs_per_node)
     error(['刚度矩阵中出现了超出 1~%d 的节点内自由度编号。' ...
@@ -107,6 +108,7 @@ max_dof = max([row_idx; col_idx]);
 
 % 使用 sparse 直接组装稀疏矩阵；若文件中存在重复项，MATLAB 会自动累加。
 K_half = sparse(row_idx, col_idx, values, max_dof, max_dof);
+% S = sparse(行号, 列号, 数值, 总行数, 总列数);
 
 % Abaqus 常只导出对称矩阵的一个三角部分，因此需要镜像补全。
 % 减去对角线是为了避免对角项被重复计算。
@@ -137,6 +139,7 @@ U_measured = reshape(U_measured_mat', [], 1);
 % 已知测点外力向量。
 % 当前假设测点没有额外已知集中力，因此初始化为零。
 % 若实际存在已知测点力，应按与 U_measured 完全相同的顺序赋值。
+% 结构当然受到未知力，否则不会产生位移。只是这些力正是程序准备反演的对象。
 F_measured = zeros(size(U_measured));
 
 %% 5. 设置虚拟受力节点与固定边界
@@ -272,12 +275,7 @@ if any(F_measured ~= 0)
     % 将已知测点力放入活动自由度空间中的稀疏列向量。
     % 原代码使用 1:length(dof_measured) 作为列索引但矩阵仅有 1 列，
     % 在 F_measured 非零时会产生列索引越界；此处统一使用列索引 1。
-    F_measured_global = sparse( ...
-        dof_measured, ...
-        ones(size(dof_measured)), ...
-        F_measured, ...
-        N_total_dof, ...
-        1);
+    F_measured_global = sparse( dof_measured, ones(size(dof_measured)), F_measured, N_total_dof, 1);
 
     % 求解已知力产生的全场位移，并提取测点位置的位移。
     U_from_F_measured_full = K_global \ F_measured_global;
