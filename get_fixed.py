@@ -4,7 +4,7 @@ from abaqusConstants import *
 import visualization
 import sys
 
-odb_name = 'pressure-2.odb'  # 替换为你的 odb 文件名
+odb_name = 'job-1.odb'  # 替换为你的 odb 文件名
 step_name = 'Step-1'            # 替换为你的分析步
 
 try:
