@@ -2,7 +2,7 @@
 #
 # Abaqus/CAE Release 2025 replay file
 # Internal Version: 2024_09_20-21.00.46 RELr427 198590
-# Run by 13104 on Fri Jul 17 17:37:26 2026
+# Run by 13104 on Mon Jul 20 17:10:04 2026
 #
 
 # from driverUtils import executeOnCaeGraphicsStartup
@@ -16,7 +16,7 @@ session.viewports['Viewport: 1'].makeCurrent()
 from driverUtils import executeOnCaeStartup
 executeOnCaeStartup()
 execfile('./get_pressure.py', __main__.__dict__)
-#: Model: D:/test/pressure-2.odb
+#: Model: D:/test/job-1.odb
 #: Number of Assemblies:         1
 #: Number of Assembly instances: 0
 #: Number of Part instances:     1

@@ -38,7 +38,7 @@ clc;
 %% 1. 用户设置
 
 inp_filepath      = 'Zhimian_addnodes_cut.inp';
-mtx_filepath      = 'get_matrix-1_STIF2.mtx';
+mtx_filepath      = 'Job-2-1_STIF2.mtx';
 measured_filepath = 'Abaqus_Nodal_U_and_Pressure.csv';
 fixed_filepath    = 'fixed_nodes.csv';
 
