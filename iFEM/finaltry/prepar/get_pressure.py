@@ -5,12 +5,26 @@ import visualization
 import sys
 
 # === 用户设置区 ===
-odb_name = 'pressure-2.odb'  # 替换为你的 odb 文件名
+odb_name = 'job-4.odb'  # 替换为你的 odb 文件名
 step_name = 'Step-1'            # 替换为你要提取的分析步
 frame_index = -1                # -1 表示提取最后一帧 (平衡状态)
 
 # 需要提取数据的目标节点 ID 列表
-target_nodes = (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)
+target_nodes = (158, 143,
+131,
+133,
+139,
+138,
+147,
+148,
+149,
+150,
+113,
+112,
+116,
+124,
+160,
+155)
 # ==================
 # 1. 打开 ODB 文件
 try:

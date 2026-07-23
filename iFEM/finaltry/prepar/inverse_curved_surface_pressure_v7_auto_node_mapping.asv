@@ -62,14 +62,14 @@ fixed_dof_components = 1:6;
 
 % +1：正压力沿计算出的表面法向
 % -1：正压力沿表面法向的反方向，通常用于外部压力压向结构
-pressure_sign = -1;
+pressure_sign = 1;
 
 % 虚拟坐标到有限元节点的绝对匹配容差
 coordinate_tolerance = 1e-6;
 
 % 相对 Tikhonov 正则化参数
 % 可尝试 1e-8、1e-6、1e-4、1e-2
-lambda_relative = 1e-14;
+lambda_relative = 1e-2;
 
 % 若测点已有已知力/压力，通常不再把测点压力作为未知量
 exclude_measured_nodes_from_virtual = true;
@@ -726,21 +726,107 @@ U_measured_baseline = U_from_known_force(dof_measured);
 Delta_U = U_measured - U_measured_baseline;
 
 
-%% 13. Tikhonov 正则化反演曲面压力
+% % % %% 13. Tikhonov 正则化反演曲面压力
+% % % 
+% % % % 求解：
+% % % % min ||H*p - Delta_U||^2 + lambda*||p||^2
+% % % %
+% % % % 使用对偶形式，避免构造巨大的 H'*H
+% % % 
+% % % H_scale = norm(H, 'fro')^2 / max(N_virtual_nodes, 1);
+% % % lambda_absolute = lambda_relative * max(H_scale, eps);
+% % % 
+% % % dual_matrix = ...
+% % %     H * H' + lambda_absolute * speye(N_measured_dof);
+% % % 
+% % % pressure_virtual = ...
+% % %     H' * (dual_matrix \ Delta_U);
 
-% 求解：
-% min ||H*p - Delta_U||^2 + lambda*||p||^2
-%
-% 使用对偶形式，避免构造巨大的 H'*H
+%% 13. Tikhonov 正则化参数选取 (L-Curve) 与曲面压力反演
 
-H_scale = norm(H, 'fro')^2 / max(N_virtual_nodes, 1);
-lambda_absolute = lambda_relative * max(H_scale, eps);
+disp('正在使用 L-curve 法寻找最优正则化参数...');
 
-dual_matrix = ...
-    H * H' + lambda_absolute * speye(N_measured_dof);
+% 1. 构造对偶矩阵并进行特征值分解 (仅需一次，极大提升计算效率)
+% A = H * H' 的维度是 [N_measured_dof, N_measured_dof]，通常较小
+A = full(H * H'); 
+[Q, D] = eig(A);
+d = max(diag(D), 0); % 提取特征值并确保非负 (消除机器精度的负零误差)
 
-pressure_virtual = ...
-    H' * (dual_matrix \ Delta_U);
+% 将测点位移残差投影到特征向量空间
+u = Q' * Delta_U;
+
+% 2. 生成对数分布的 lambda 候选向量
+% 依据最大特征值设定合理的搜索范围 (通常从 1e-12*d_max 到 1*d_max)
+n_lambdas = 100;
+lambda_vec = logspace(-12, 0, n_lambdas) * max(d);
+t_vec = log10(lambda_vec);
+
+eta = zeros(1, n_lambdas); % 解的范数 ||p||
+rho = zeros(1, n_lambdas); % 残差范数 ||Hp - Delta_U||
+
+% 3. 快速计算每个 lambda 对应的 eta 和 rho (基于标量运算，无需矩阵求逆)
+for i = 1:n_lambdas
+    lam = lambda_vec(i);
+
+    % 投影空间中的权重系数：u_i / (d_i + lam)
+    w = u ./ (d + lam);
+
+    % 解的范数: ||p||^2 = \sum (d_i * w_i^2)
+    eta(i) = sqrt(sum(d .* (w.^2)));
+
+    % 残差的范数: ||Hp - Delta_U||^2 = \sum ( (lam * u_i / (d_i + lam))^2 )
+    rho(i) = sqrt(sum( (lam .* u ./ (d + lam)).^2 ));
+end
+
+% 4. 计算 L 曲线的曲率以寻找“拐点”
+% 在对数坐标下参数化，设 x = log(rho), y = log(eta)
+x = log(rho);
+y = log(eta);
+
+% 离散求导计算曲率
+dx_dt = gradient(x, t_vec);
+dy_dt = gradient(y, t_vec);
+d2x_dt2 = gradient(dx_dt, t_vec);
+d2y_dt2 = gradient(dy_dt, t_vec);
+
+% 曲率公式: k = (x'y'' - y'x'') / (x'^2 + y'^2)^(3/2)
+curvature = (dx_dt .* d2y_dt2 - dy_dt .* d2x_dt2) ./ ...
+            max((dx_dt.^2 + dy_dt.^2).^(1.5), eps);
+
+% 剔除两端的极值点防止由于截断造成的伪曲率峰值
+valid_idx = 5:(n_lambdas-5);
+[~, max_idx_offset] = max(curvature(valid_idx));
+opt_idx = valid_idx(max_idx_offset);
+lambda_opt = lambda_vec(opt_idx);
+
+fprintf('L-curve 寻优完成，最优 lambda = %.6e\n', lambda_opt);
+
+% 5. 绘制 L 曲线和曲率图供人工校验
+figure('Name', 'L-Curve Analysis', 'Color', 'w', 'Position', [150, 150, 1000, 400]);
+
+% 左图：L 曲线
+subplot(1, 2, 1);
+loglog(rho, eta, 'b-', 'LineWidth', 2); hold on;
+loglog(rho(opt_idx), eta(opt_idx), 'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
+grid on;
+xlabel('残差范数 ||Hp - \DeltaU||');
+ylabel('解的范数 ||p|| (压力大小惩罚)');
+title('L-Curve (双对数坐标)');
+legend('L曲线', sprintf('最大曲率拐点 (\\lambda = %.2e)', lambda_opt), 'Location', 'northeast');
+
+% 右图：曲率随 lambda 的变化
+subplot(1, 2, 2);
+semilogx(lambda_vec, curvature, 'k-', 'LineWidth', 1.5); hold on;
+semilogx(lambda_opt, curvature(opt_idx), 'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
+grid on;
+xlabel('正则化参数 \lambda');
+ylabel('对数曲线曲率 \kappa');
+title('曲率随 \lambda 的变化');
+legend('曲率', '最优 \lambda 选取点');
+
+% 6. 使用寻优得到的最优 lambda 重新计算最终的虚拟表面压力
+dual_matrix = A + lambda_opt * speye(N_measured_dof);
+pressure_virtual = H' * (dual_matrix \ Delta_U);
 
 
 %% 14. 根据重构压力计算完整位移和虚拟点位移
