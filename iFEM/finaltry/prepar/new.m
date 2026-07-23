@@ -73,6 +73,14 @@ exclude_measured_nodes_from_virtual = false;
 
 [node_ids, node_coords, exterior_triangles] = ...
     read_abaqus_surface_mesh(inp_filepath);
+%% 将 INP/HyperMesh 坐标转换为 Abaqus ODB 全局坐标
+R_inp_to_odb = diag([1, -1, -1]);
+
+node_coords = node_coords * R_inp_to_odb;
+
+fprintf('读取节点数量：%d\n', numel(node_ids));
+fprintf('识别外表面三角形数量：%d\n', size(exterior_triangles, 1));
+
 
 fprintf('读取节点数量：%d\n', numel(node_ids));
 fprintf('识别外表面三角形数量：%d\n', size(exterior_triangles, 1));
