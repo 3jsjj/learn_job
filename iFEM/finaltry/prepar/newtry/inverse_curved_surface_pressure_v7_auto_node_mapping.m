@@ -38,7 +38,7 @@ clc;
 %% 1. 用户设置
 
 inp_filepath      = 'Zhimian_addnodes_cut.inp';
-mtx_filepath      = 'Job-2-1_STIF2.mtx';
+mtx_filepath      = 'Job-5-1_STIF2.mtx';
 measured_filepath = 'Abaqus_Nodal_U_and_Pressure.csv';
 fixed_filepath    = 'fixed_nodes.csv';
 
@@ -62,14 +62,14 @@ fixed_dof_components = 1:6;
 
 % +1：正压力沿计算出的表面法向
 % -1：正压力沿表面法向的反方向，通常用于外部压力压向结构
-pressure_sign = -1;
+pressure_sign = 1;
 
 % 虚拟坐标到有限元节点的绝对匹配容差
 coordinate_tolerance = 1e-6;
 
 % 相对 Tikhonov 正则化参数
 % 可尝试 1e-8、1e-6、1e-4、1e-2
-lambda_relative = 1e-6;
+lambda_relative = 1e-2;
 
 % 若测点已有已知力/压力，通常不再把测点压力作为未知量
 exclude_measured_nodes_from_virtual = true;
@@ -726,21 +726,107 @@ U_measured_baseline = U_from_known_force(dof_measured);
 Delta_U = U_measured - U_measured_baseline;
 
 
-%% 13. Tikhonov 正则化反演曲面压力
+% % % %% 13. Tikhonov 正则化反演曲面压力
+% % % 
+% % % % 求解：
+% % % % min ||H*p - Delta_U||^2 + lambda*||p||^2
+% % % %
+% % % % 使用对偶形式，避免构造巨大的 H'*H
+% % % 
+% % % H_scale = norm(H, 'fro')^2 / max(N_virtual_nodes, 1);
+% % % lambda_absolute = lambda_relative * max(H_scale, eps);
+% % % 
+% % % dual_matrix = ...
+% % %     H * H' + lambda_absolute * speye(N_measured_dof);
+% % % 
+% % % pressure_virtual = ...
+% % %     H' * (dual_matrix \ Delta_U);
 
-% 求解：
-% min ||H*p - Delta_U||^2 + lambda*||p||^2
-%
-% 使用对偶形式，避免构造巨大的 H'*H
+%% 13. Tikhonov 正则化参数选取 (L-Curve) 与曲面压力反演
 
-H_scale = norm(H, 'fro')^2 / max(N_virtual_nodes, 1);
-lambda_absolute = lambda_relative * max(H_scale, eps);
+disp('正在使用 L-curve 法寻找最优正则化参数...');
 
-dual_matrix = ...
-    H * H' + lambda_absolute * speye(N_measured_dof);
+% 1. 构造对偶矩阵并进行特征值分解 (仅需一次，极大提升计算效率)
+% A = H * H' 的维度是 [N_measured_dof, N_measured_dof]，通常较小
+A = full(H * H'); 
+[Q, D] = eig(A);
+d = max(diag(D), 0); % 提取特征值并确保非负 (消除机器精度的负零误差)
 
-pressure_virtual = ...
-    H' * (dual_matrix \ Delta_U);
+% 将测点位移残差投影到特征向量空间
+u = Q' * Delta_U;
+
+% 2. 生成对数分布的 lambda 候选向量
+% 依据最大特征值设定合理的搜索范围 (通常从 1e-12*d_max 到 1*d_max)
+n_lambdas = 100;
+lambda_vec = logspace(-12, 0, n_lambdas) * max(d);
+t_vec = log10(lambda_vec);
+
+eta = zeros(1, n_lambdas); % 解的范数 ||p||
+rho = zeros(1, n_lambdas); % 残差范数 ||Hp - Delta_U||
+
+% 3. 快速计算每个 lambda 对应的 eta 和 rho (基于标量运算，无需矩阵求逆)
+for i = 1:n_lambdas
+    lam = lambda_vec(i);
+
+    % 投影空间中的权重系数：u_i / (d_i + lam)
+    w = u ./ (d + lam);
+
+    % 解的范数: ||p||^2 = \sum (d_i * w_i^2)
+    eta(i) = sqrt(sum(d .* (w.^2)));
+
+    % 残差的范数: ||Hp - Delta_U||^2 = \sum ( (lam * u_i / (d_i + lam))^2 )
+    rho(i) = sqrt(sum( (lam .* u ./ (d + lam)).^2 ));
+end
+
+% 4. 计算 L 曲线的曲率以寻找“拐点”
+% 在对数坐标下参数化，设 x = log(rho), y = log(eta)
+x = log(rho);
+y = log(eta);
+
+% 离散求导计算曲率
+dx_dt = gradient(x, t_vec);
+dy_dt = gradient(y, t_vec);
+d2x_dt2 = gradient(dx_dt, t_vec);
+d2y_dt2 = gradient(dy_dt, t_vec);
+
+% 曲率公式: k = (x'y'' - y'x'') / (x'^2 + y'^2)^(3/2)
+curvature = (dx_dt .* d2y_dt2 - dy_dt .* d2x_dt2) ./ ...
+            max((dx_dt.^2 + dy_dt.^2).^(1.5), eps);
+
+% 剔除两端的极值点防止由于截断造成的伪曲率峰值
+valid_idx = 5:(n_lambdas-5);
+[~, max_idx_offset] = max(curvature(valid_idx));
+opt_idx = valid_idx(max_idx_offset);
+lambda_opt = lambda_vec(opt_idx);
+
+fprintf('L-curve 寻优完成，最优 lambda = %.6e\n', lambda_opt);
+
+% 5. 绘制 L 曲线和曲率图供人工校验
+figure('Name', 'L-Curve Analysis', 'Color', 'w', 'Position', [150, 150, 1000, 400]);
+
+% 左图：L 曲线
+subplot(1, 2, 1);
+loglog(rho, eta, 'b-', 'LineWidth', 2); hold on;
+loglog(rho(opt_idx), eta(opt_idx), 'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
+grid on;
+xlabel('残差范数 ||Hp - \DeltaU||');
+ylabel('解的范数 ||p|| (压力大小惩罚)');
+title('L-Curve (双对数坐标)');
+legend('L曲线', sprintf('最大曲率拐点 (\\lambda = %.2e)', lambda_opt), 'Location', 'northeast');
+
+% 右图：曲率随 lambda 的变化
+subplot(1, 2, 2);
+semilogx(lambda_vec, curvature, 'k-', 'LineWidth', 1.5); hold on;
+semilogx(lambda_opt, curvature(opt_idx), 'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
+grid on;
+xlabel('正则化参数 \lambda');
+ylabel('对数曲线曲率 \kappa');
+title('曲率随 \lambda 的变化');
+legend('曲率', '最优 \lambda 选取点');
+
+% 6. 使用寻优得到的最优 lambda 重新计算最终的虚拟表面压力
+dual_matrix = A + lambda_opt * speye(N_measured_dof);
+pressure_virtual = H' * (dual_matrix \ Delta_U);
 
 
 %% 14. 根据重构压力计算完整位移和虚拟点位移
@@ -787,7 +873,48 @@ fprintf('全局平衡相对残差：%.6e\n', ...
 fprintf('最小重构压力：%.6e\n', min(pressure_virtual));
 fprintf('最大重构压力：%.6e\n', max(pressure_virtual));
 fprintf('==========================================\n');
+%% 逐测点位移误差检查
 
+U_measured_predicted_mat = reshape( ...
+    U_measured_predicted, 3, [])';
+
+U_error_mat = ...
+    U_measured_predicted_mat - U_measured_mat;
+
+U_abs_error_mat = abs(U_error_mat);
+
+U_node_error_norm = vecnorm(U_error_mat, 2, 2);
+U_node_true_norm  = vecnorm(U_measured_mat, 2, 2);
+
+U_node_relative_error = ...
+    U_node_error_norm ./ max(U_node_true_norm, eps);
+
+displacement_check_table = table( ...
+    id_measured(:), ...
+    U_measured_mat(:,1), ...
+    U_measured_predicted_mat(:,1), ...
+    U_error_mat(:,1), ...
+    U_measured_mat(:,2), ...
+    U_measured_predicted_mat(:,2), ...
+    U_error_mat(:,2), ...
+    U_measured_mat(:,3), ...
+    U_measured_predicted_mat(:,3), ...
+    U_error_mat(:,3), ...
+    U_node_error_norm, ...
+    U_node_relative_error, ...
+    'VariableNames', { ...
+        'NodeID', ...
+        'U1_True', 'U1_Predicted', 'U1_Error', ...
+        'U2_True', 'U2_Predicted', 'U2_Error', ...
+        'U3_True', 'U3_Predicted', 'U3_Error', ...
+        'DisplacementErrorNorm', ...
+        'RelativeError'});
+
+disp(displacement_check_table);
+
+writetable( ...
+    displacement_check_table, ...
+    'Measured_Displacement_Check.csv');
 
 %% 16. 输出 CSV
 
@@ -875,4 +1002,284 @@ quiver3( ...
 
 hold off;
 
+%% 17. 绘制虚拟节点 U1、U2、U3 位移云图
 
+% 位移单位，请根据模型单位修改
+displacement_unit = 'mm';
+
+% exterior_triangles 中保存的是 node_coords 的行号。
+% 如果你的变量名是 surface_triangles，请改为：
+% exterior_triangles = surface_triangles;
+
+% 基本尺寸检查
+if size(U_virtual_3D, 1) ~= numel(virtual_node_rows)
+    error(['U_virtual_3D 的行数与 virtual_node_rows 数量不一致。', ...
+        '无法建立节点位移和节点位置的对应关系。']);
+end
+
+if size(U_virtual_3D, 2) < 3
+    error('U_virtual_3D 至少需要包含 U1、U2、U3 三列。');
+end
+
+%% 将外表面三角形的全模型节点行号，映射成虚拟节点局部行号
+
+% 第 r 个全模型节点对应虚拟节点数组中的第几个节点。
+% 0 表示该节点不在当前虚拟节点集合中。
+node_row_to_virtual_row = zeros(size(node_coords, 1), 1);
+
+node_row_to_virtual_row(virtual_node_rows) = ...
+    (1:numel(virtual_node_rows))';
+
+% 将三角形中的 node_coords 行号转换为 virtual_coords 行号
+virtual_triangles = ...
+    node_row_to_virtual_row(exterior_triangles);
+
+% 只有三个顶点都属于虚拟节点集合的三角形才能绘制
+valid_virtual_triangles = all(virtual_triangles > 0, 2);
+
+virtual_triangles = ...
+    virtual_triangles(valid_virtual_triangles, :);
+
+fprintf('\n位移云图使用的有效三角形数量：%d / %d\n', ...
+    size(virtual_triangles, 1), ...
+    size(exterior_triangles, 1));
+
+if isempty(virtual_triangles)
+    warning(['没有完整保留的虚拟节点三角形。', ...
+        '程序将自动使用散点云图。']);
+end
+
+%% 三个位移分量分别绘图
+
+component_names = {'U1', 'U2', 'U3'};
+component_titles = { ...
+    '重构位移云图 U1', ...
+    '重构位移云图 U2', ...
+    '重构位移云图 U3'};
+
+for component_index = 1:3
+
+    displacement_value = ...
+        U_virtual_3D(:, component_index);
+
+    figure( ...
+        'Name', component_titles{component_index}, ...
+        'Color', 'w', ...
+        'Position', [100, 100, 850, 650]);
+
+    if ~isempty(virtual_triangles)
+
+        % 基于外表面三角形绘制连续云图
+        trisurf( ...
+            virtual_triangles, ...
+            virtual_coords(:, 1), ...
+            virtual_coords(:, 2), ...
+            virtual_coords(:, 3), ...
+            displacement_value, ...
+            'FaceColor', 'interp', ...
+            'EdgeColor', 'none');
+
+    else
+
+        % 没有完整三角形时，退化为节点散点云图
+        scatter3( ...
+            virtual_coords(:, 1), ...
+            virtual_coords(:, 2), ...
+            virtual_coords(:, 3), ...
+            40, ...
+            displacement_value, ...
+            'filled', ...
+            'MarkerEdgeColor', 'none');
+    end
+
+    axis equal;
+    axis tight;
+    grid on;
+    box on;
+    view(45, 30);
+
+    xlabel('X 坐标');
+    ylabel('Y 坐标');
+    zlabel('Z 坐标');
+
+    title(component_titles{component_index}, ...
+        'FontSize', 14, ...
+        'FontWeight', 'bold');
+
+    colormap(jet(256));
+
+    cb = colorbar;
+    ylabel(cb, ...
+        sprintf('%s 位移 (%s)', ...
+        component_names{component_index}, ...
+        displacement_unit), ...
+        'FontSize', 11);
+
+    % 令颜色范围关于 0 对称，便于观察正负位移
+    finite_values = displacement_value( ...
+        isfinite(displacement_value));
+
+    if ~isempty(finite_values)
+        color_limit = max(abs(finite_values));
+
+        if color_limit > 0
+            caxis([-color_limit, color_limit]);
+        end
+    end
+
+    set(gca, ...
+        'FontSize', 11, ...
+        'DataAspectRatio', [1, 1, 1]);
+
+    % 可选：保存 300 dpi 图片
+    output_image_name = sprintf( ...
+        'Reconstructed_%s_Cloud.png', ...
+        component_names{component_index});
+
+    exportgraphics( ...
+        gcf, ...
+        output_image_name, ...
+        'Resolution', 300);
+
+    fprintf('已保存：%s\n', output_image_name);
+end
+
+
+%% 18. 重新计算完整外表面位移，用于和 Abaqus 对比
+
+% 反演后的总活动载荷
+F_total_reconstructed = ...
+    F_known + G * pressure_virtual;
+
+% 反演载荷产生的全部活动自由度位移
+U_full_reconstructed = ...
+    K_global \ F_total_reconstructed;
+
+% 获取全部外表面节点行号
+surface_node_rows = unique(exterior_triangles(:));
+
+surface_node_ids = node_ids(surface_node_rows);
+surface_mtx_ids = node_row_to_mtx_id(surface_node_rows);
+
+N_surface_nodes = numel(surface_node_rows);
+
+% 初始化外表面位移
+% 固定节点默认位移为 0；
+% 无法映射的节点后面设置为 NaN
+U_surface_3D = zeros(N_surface_nodes, 3);
+
+surface_mapping_valid = isfinite(surface_mtx_ids);
+
+surface_global_dofs = nan(N_surface_nodes, 3);
+
+surface_global_dofs(surface_mapping_valid, :) = ...
+    node_dof_numbers( ...
+        surface_mtx_ids(surface_mapping_valid), ...
+        num_dofs_per_node, ...
+        translation_dofs);
+
+% 检查三个平移自由度是否都属于活动自由度
+surface_active = ...
+    surface_mapping_valid & ...
+    all(ismember(surface_global_dofs, active_dofs), 2);
+
+% 将绝对自由度编号转换为 K_global 局部编号
+[~, surface_local_dofs] = ...
+    ismember(surface_global_dofs(surface_active, :), ...
+             active_dofs);
+
+% 提取三个方向位移
+U_surface_3D(surface_active, :) = ...
+    reshape( ...
+        U_full_reconstructed( ...
+            reshape(surface_local_dofs', [], 1)), ...
+        3, [])';
+
+% 无法进行节点映射的点设为 NaN
+U_surface_3D(~surface_mapping_valid, :) = NaN;
+
+% 外表面节点坐标
+surface_coords = node_coords(surface_node_rows, 1:3);
+
+%% 将原始外表面三角形转换为 surface_coords 的局部编号
+
+node_row_to_surface_row = zeros(size(node_coords, 1), 1);
+
+node_row_to_surface_row(surface_node_rows) = ...
+    (1:N_surface_nodes)';
+
+surface_triangles_local = ...
+    node_row_to_surface_row(exterior_triangles);
+
+valid_surface_triangles = ...
+    all(surface_triangles_local > 0, 2);
+
+surface_triangles_local = ...
+    surface_triangles_local(valid_surface_triangles, :);
+
+%% 分别绘制完整外表面的 U1、U2、U3
+
+component_names = {'U1', 'U2', 'U3'};
+
+for component_index = 1:3
+
+    displacement_value = ...
+        U_surface_3D(:, component_index);
+
+    figure( ...
+        'Name', ['完整表面 ', component_names{component_index}], ...
+        'Color', 'w', ...
+        'Position', [100, 100, 850, 650]);
+
+    trisurf( ...
+        surface_triangles_local, ...
+        surface_coords(:, 1), ...
+        surface_coords(:, 2), ...
+        surface_coords(:, 3), ...
+        displacement_value, ...
+        'FaceColor', 'interp', ...
+        'EdgeColor', 'none');
+
+    axis equal;
+    axis tight;
+    grid on;
+    box on;
+    view(45, 30);
+
+    xlabel('X 坐标');
+    ylabel('Y 坐标');
+    zlabel('Z 坐标');
+
+    title( ...
+        sprintf('完整外表面重构位移 %s', ...
+        component_names{component_index}), ...
+        'FontSize', 14, ...
+        'FontWeight', 'bold');
+
+    colormap(jet(256));
+
+    cb = colorbar;
+    ylabel(cb, ...
+        sprintf('%s 位移 (%s)', ...
+        component_names{component_index}, ...
+        displacement_unit));
+
+    finite_values = displacement_value( ...
+        isfinite(displacement_value));
+
+    if ~isempty(finite_values)
+        color_limit = max(abs(finite_values));
+
+        if color_limit > 0
+            caxis([-color_limit, color_limit]);
+        end
+    end
+
+    output_image_name = sprintf( ...
+        'Full_Surface_Reconstructed_%s.png', ...
+        component_names{component_index});
+
+    exportgraphics( ...
+        gcf, output_image_name, ...
+        'Resolution', 300);
+end

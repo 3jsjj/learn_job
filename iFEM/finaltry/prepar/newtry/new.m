@@ -1,35 +1,33 @@
 % =========================================================================
-% 曲面压力逆有限元重构（简洁版）
+% 曲面压力逆有限元重构（仅位移反演版）
 %
-% 目标：
-%   1) 输入真实测点位移和真实测点力/压力；
-%   2) 在 virtual_coords 指定的曲面节点上反演标量压力 p；
-%   3) 根据重构压力计算虚拟节点位移；
+% 核心逻辑：
+%   1) 从 measured_filepath 读取测点 NodeID、U1、U2、U3；
+%   2) 只使用测点位移作为观测量，反演目标曲面的压力；
+%   3) CSV 第 5 列若存在，仅作为真实压力参考值，用于反演后比较，
+%      绝不会作为已知载荷参与求解；
+%   4) 默认先使用“均匀压力”模式验证整个反演链条，验证通过后可切换
+%      到“节点压力”模式。
 %
-% 曲面压力不是独立的 Fx、Fy、Fz。
-% 每个虚拟节点只有一个未知压力 p_i，并转换为等效节点力：
+% 曲面压力到等效节点力：
 %
 %       f_i = pressure_sign * p_i * A_i * n_i
 %
 % 其中：
 %   n_i：曲面节点单位法向；
 %   A_i：节点分摊面积；
+%   p_i：待反演压力；
 %   pressure_sign = -1 表示正压力沿外法向反方向作用。
 %
-% 输入文件类型与原程序一致：
-%   .inp  : Abaqus 节点和单元
-%   .mtx  : 5 列刚度矩阵 [NodeI, DOFI, NodeJ, DOFJ, Value]
-%   .csv  : 测点数据、固定节点、可选虚拟点坐标
-%
-% 测点 CSV 支持两种格式：
-%   格式 A：NodeID, U1, U2, U3, F1, F2, F3
-%   格式 B：NodeID, U1, U2, U3, Pressure
+% 测点 CSV：
+%   必需列：NodeID, U1, U2, U3
+%   可选第 5 列：PressureReference，仅用于结果验证，不参与反演。
 %
 % 单位：
-%   若刚度为 N/mm、坐标为 mm，则输出压力为 N/mm^2，即 MPa。
+%   若刚度为 N/mm、坐标为 mm、位移为 mm，则压力为 N/mm^2，即 MPa。
 %
-% 本版本适用于当前上传的壳单元 .mtx：
-%   每节点 6 自由度，压力仅装配到 U1/U2/U3 平移自由度。
+% 本版本适用于当前壳单元刚度矩阵：
+%   每节点 6 自由度，压力只装配到 U1/U2/U3 平移自由度。
 % =========================================================================
 
 clear;
@@ -42,38 +40,34 @@ mtx_filepath      = 'Job-5-1_STIF2.mtx';
 measured_filepath = 'Abaqus_Nodal_U_and_Pressure.csv';
 fixed_filepath    = 'fixed_nodes.csv';
 
-% fixed_nodes.csv 只需要一列固定节点 ID。
-% 程序会自动完成：
-%   INP NodeID -> node_ids 中的行号 -> node_coords -> MTX NodeID
-% 不再使用人工编号偏移。
-
-% 可选文件：每行 [X, Y, Z]，必须对应目标曲面的有限元节点。
-% 如果文件不存在，程序默认使用模型全部外表面节点。
+% 可选文件：每行 [X, Y, Z]，必须对应目标加载曲面的有限元节点。
+% 若文件不存在，程序默认使用模型全部外表面节点。
 virtual_coords_filepath = 'virtual_coords.csv';
 
-% 当前 .mtx 已确认是壳单元矩阵：每个节点 6 个自由度
-% 1-3 为平移 U1/U2/U3，4-6 为转动 UR1/UR2/UR3
+% 当前 .mtx 为壳单元矩阵：每个节点 6 个自由度。
+% 1-3 为平移 U1/U2/U3，4-6 为转动 UR1/UR2/UR3。
 num_dofs_per_node = 6;
 translation_dofs = [1, 2, 3];
 
-% 若 fixed_nodes.csv 表示“完全固支边缘”，约束全部 6 个自由度。
-% 如果边界不是完全固支，请改成实际受约束的自由度编号。
+% 固定边界约束的自由度分量。
+% 完全固支壳边界通常约束 1:6。
 fixed_dof_components = 1:6;
 
-% +1：正压力沿计算出的表面法向
-% -1：正压力沿表面法向的反方向，通常用于外部压力压向结构
-pressure_sign = 1;
+% +1：正压力沿计算出的表面法向；
+% -1：正压力沿表面法向反方向，外部压力压向结构时通常使用 -1。
+pressure_sign = -1;
 
-% 虚拟坐标到有限元节点的绝对匹配容差
+% 虚拟坐标到有限元节点的绝对匹配容差。
 coordinate_tolerance = 1e-6;
 
-% 相对 Tikhonov 正则化参数
-% 可尝试 1e-8、1e-6、1e-4、1e-2
-lambda_relative = 1e-2;
+% 反演模式：
+%   'uniform'：整个目标曲面只有一个均匀压力未知量，建议首先使用；
+%   'nodal'  ：每个虚拟节点一个压力未知量，使用 L-curve 正则化。
+inversion_mode = 'uniform';
 
-% 若测点已有已知力/压力，通常不再把测点压力作为未知量
-exclude_measured_nodes_from_virtual = true;
-
+% 测点节点也允许作为压力未知节点。
+% 因为测点位移是观测量，并不代表该节点压力已知。
+exclude_measured_nodes_from_virtual = false;
 
 %% 2. 读取节点、单元及模型外表面三角形
 
@@ -132,41 +126,54 @@ if isempty(virtual_node_rows)
 end
 
 
-%% 4. 读取真实测点位移和力/压力
+%% 4. 读取真实测点位移
 
 measured_data = readmatrix(measured_filepath);
-% 看数据的列数是不是小于5
-if size(measured_data, 2) < 5
-    error(['测点文件至少应为：', ...
-           'NodeID, U1, U2, U3, Pressure，', ...
-           '或者 NodeID, U1, U2, U3, F1, F2, F3。']);
+pressure_true = measured_data(:,5);
+pressure_true = pressure_true(isfinite(pressure_true));
+
+fprintf('\n========== 真实压力检查 ==========\n');
+fprintf('压力数量：%d\n', numel(pressure_true));
+fprintf('最小压力：%.9e\n', min(pressure_true));
+fprintf('最大压力：%.9e\n', max(pressure_true));
+fprintf('平均压力：%.9e\n', mean(pressure_true));
+fprintf('标准差：%.9e\n', std(pressure_true));
+fprintf('=================================\n');
+
+% 反演只要求 NodeID、U1、U2、U3 四列。
+if size(measured_data, 2) < 4
+    error('测点文件至少需要四列：NodeID, U1, U2, U3。');
 end
 
 id_measured_raw = measured_data(:, 1);
 U_measured_raw  = measured_data(:, 2:4);
-% 数据的列数是不是大于7
-if size(measured_data, 2) >= 7
-    measured_input_type = 'force';
-    measured_load_raw = measured_data(:, 5:7);
 
-    valid_measured_data = ...
-        isfinite(id_measured_raw) & ...
-        all(isfinite(U_measured_raw), 2) & ...
-        all(isfinite(measured_load_raw), 2);
-else
-    measured_input_type = 'pressure';
-    measured_load_raw = measured_data(:, 5);
-    % 节点id有效，位移数据有效，载荷有效（三个要求同时满足）
-    valid_measured_data = ...
-        isfinite(id_measured_raw) & ...
-        all(isfinite(U_measured_raw), 2) & ...
-        isfinite(measured_load_raw);
+% 如果恰好存在第 5 列，将其保存为真实压力参考值。
+% 此列只用于反演完成后的比较，绝不参与载荷组装。
+has_pressure_reference = size(measured_data, 2) >= 5 && ...
+                         size(measured_data, 2) < 7;
+
+pressure_reference_raw = nan(size(measured_data, 1), 1);
+
+if has_pressure_reference
+    pressure_reference_raw = measured_data(:, 5);
 end
-% 重新数据赋值，只保留上面查过的有效的数据
-id_measured_raw = id_measured_raw(valid_measured_data);
-U_measured_raw  = U_measured_raw(valid_measured_data, :);
-measured_load_raw = measured_load_raw(valid_measured_data, :);
-% 逐个查询id_measure_raw中的数据是否存在于node_ids，返回是否存在和存在的位置
+
+% 有效性筛选只依据 NodeID 和位移；参考压力允许为 NaN。
+valid_measured_data = ...
+    isfinite(id_measured_raw) & ...
+    all(isfinite(U_measured_raw), 2);
+
+id_measured_raw = ...
+    id_measured_raw(valid_measured_data);
+
+U_measured_raw = ...
+    U_measured_raw(valid_measured_data, :);
+
+pressure_reference_raw = ...
+    pressure_reference_raw(valid_measured_data);
+
+% 将测点 NodeID 映射到 INP 节点行号。
 [measured_id_exists, measured_node_rows_raw] = ...
     ismember(id_measured_raw, node_ids);
 
@@ -175,15 +182,21 @@ if any(~measured_id_exists)
         nnz(~measured_id_exists));
 end
 
-id_measured_raw    = id_measured_raw(measured_id_exists);
-U_measured_raw     = U_measured_raw(measured_id_exists, :);
-measured_load_raw  = measured_load_raw(measured_id_exists, :);
-measured_node_rows = measured_node_rows_raw(measured_id_exists);
+id_measured_raw = ...
+    id_measured_raw(measured_id_exists);
+
+U_measured_raw = ...
+    U_measured_raw(measured_id_exists, :);
+
+pressure_reference_raw = ...
+    pressure_reference_raw(measured_id_exists);
+
+measured_node_rows = ...
+    measured_node_rows_raw(measured_id_exists);
 
 if isempty(measured_node_rows)
-    error('没有有效的真实测点。');
+    error('没有有效的真实测点位移。');
 end
-
 
 %% 5. 从目标曲面网格计算节点法向和分摊面积
 
@@ -499,7 +512,7 @@ measured_has_mtx_mapping = ...
 measured_global_dofs = nan( ...
     numel(measured_mtx_ids_raw), ...
     numel(translation_dofs));
-% 提取真是测点对应的自由度编号
+
 measured_global_dofs(measured_has_mtx_mapping, :) = ...
     node_dof_numbers( ...
         measured_mtx_ids_raw(measured_has_mtx_mapping), ...
@@ -527,8 +540,8 @@ measured_mtx_ids = ...
 U_measured_mat = ...
     U_measured_raw(valid_measured_active, :);
 
-measured_load = ...
-    measured_load_raw(valid_measured_active, :);
+pressure_reference = ...
+    pressure_reference_raw(valid_measured_active);
 
 measured_global_dofs = ...
     measured_global_dofs(valid_measured_active, :);
@@ -546,40 +559,16 @@ if isempty(dof_measured)
     error('过滤后没有有效测点自由度。');
 end
 
-
-%% 9. 将测点已知力或已知压力转换为节点力
-
-if strcmp(measured_input_type, 'force')
-    % CSV 已直接给出 F1、F2、F3
-    F_measured_mat = measured_load;
-else
-    % CSV 给出标量压力，转换为沿局部曲面法向的等效节点力
-    measured_normals = node_normals(measured_node_rows, :);
-    measured_areas   = node_areas(measured_node_rows);
-
-    if any(measured_areas <= 0)
-        error('部分压力测点没有有效的曲面分摊面积。');
-    end
-
-    measured_force_per_pressure = bsxfun( ...
-        @times, measured_normals, pressure_sign .* measured_areas);
-
-    F_measured_mat = bsxfun( ...
-        @times, measured_force_per_pressure, measured_load);
-end
-
-F_measured = reshape(F_measured_mat', [], 1);
+%% 9. 反演时不使用真实压力作为已知载荷
 
 N_total_dof = size(K_global, 1);
 
-% sparse(行号，列号，数值，行数，列数）
-F_known = sparse( ...
-    dof_measured, ...
-    ones(size(dof_measured)), ...
-    F_measured, ...
-    N_total_dof, ...
-    1);
+% 这里只使用测点位移反演压力。
+% 即使 measured CSV 第 5 列存在真实压力，也不把它加入 F_known。
+F_known = sparse(N_total_dof, 1);
 
+fprintf('\n');
+fprintf('反演模式：只使用测点位移，已知载荷向量 F_known = 0。\n');
 
 %% 10. 过滤虚拟压力节点并构造压力到节点力的映射 G
 
@@ -662,6 +651,59 @@ virtual_global_dofs = virtual_global_dofs(valid_virtual_active, :);
 
 N_virtual_nodes = numel(id_virtual);
 
+%% 检查真实压力节点与反演曲面的对应关系
+
+pressure_reference_ids = measured_data(:,1);
+pressure_reference_values = measured_data(:,5);
+
+valid_pressure_reference = ...
+    isfinite(pressure_reference_ids) & ...
+    isfinite(pressure_reference_values);
+
+pressure_reference_ids = ...
+    pressure_reference_ids(valid_pressure_reference);
+
+pressure_reference_values = ...
+    pressure_reference_values(valid_pressure_reference);
+
+% 真实压力节点是否属于反演节点
+[pressure_is_virtual, pressure_virtual_index] = ...
+    ismember(pressure_reference_ids, id_virtual);
+
+% 反演节点中哪些具有真实压力
+[virtual_has_true_pressure, virtual_true_index] = ...
+    ismember(id_virtual, pressure_reference_ids);
+
+fprintf('\n');
+fprintf('========== 压力节点对应检查 ==========\n');
+
+fprintf('真实压力数据数量：%d\n', ...
+    numel(pressure_reference_ids));
+
+fprintf('反演压力节点数量：%d\n', ...
+    N_virtual_nodes);
+
+fprintf('真实压力点属于反演节点：%d / %d\n', ...
+    nnz(pressure_is_virtual), ...
+    numel(pressure_reference_ids));
+
+fprintf('反演节点具有真实压力：%d / %d\n', ...
+    nnz(virtual_has_true_pressure), ...
+    N_virtual_nodes);
+
+fprintf('覆盖比例：%.2f %%\n', ...
+    100 * nnz(virtual_has_true_pressure) / ...
+    max(N_virtual_nodes, 1));
+
+if any(~pressure_is_virtual)
+    fprintf('没有进入反演曲面的真实压力 NodeID：\n');
+    disp(pressure_reference_ids(~pressure_is_virtual));
+end
+
+fprintf('======================================\n');
+
+
+
 if N_virtual_nodes == 0
     if exclude_measured_nodes_from_virtual && ...
             all(virtual_is_measured | ~virtual_is_active)
@@ -718,125 +760,179 @@ Z = K_global' \ E_measured;
 H = Z' * G;
 
 
-%% 12. 扣除测点已知载荷产生的基准位移
+%% 12. 将测点位移直接作为反演目标
 
-U_from_known_force = K_global \ F_known;
-U_measured_baseline = U_from_known_force(dof_measured);
+% 本版本没有已知压力载荷，因此不需要扣除基准位移。
+U_from_known_force = zeros(N_total_dof, 1);
+U_measured_baseline = zeros(size(U_measured));
 
-Delta_U = U_measured - U_measured_baseline;
+Delta_U = U_measured;
 
+fprintf('\n');
+fprintf('输入测点位移范数：%.6e\n', norm(U_measured));
+fprintf('反演目标位移范数：%.6e\n', norm(Delta_U));
 
-% % % %% 13. Tikhonov 正则化反演曲面压力
-% % % 
-% % % % 求解：
-% % % % min ||H*p - Delta_U||^2 + lambda*||p||^2
-% % % %
-% % % % 使用对偶形式，避免构造巨大的 H'*H
-% % % 
-% % % H_scale = norm(H, 'fro')^2 / max(N_virtual_nodes, 1);
-% % % lambda_absolute = lambda_relative * max(H_scale, eps);
-% % % 
-% % % dual_matrix = ...
-% % %     H * H' + lambda_absolute * speye(N_measured_dof);
-% % % 
-% % % pressure_virtual = ...
-% % %     H' * (dual_matrix \ Delta_U);
+%% 13. 使用测点位移反演曲面压力
 
-%% 13. Tikhonov 正则化参数选取 (L-Curve) 与曲面压力反演
+fprintf('\n');
+fprintf('当前压力反演模式：%s\n', inversion_mode);
 
-disp('正在使用 L-curve 法寻找最优正则化参数...');
+switch lower(inversion_mode)
 
-% 1. 构造对偶矩阵并进行特征值分解 (仅需一次，极大提升计算效率)
-% A = H * H' 的维度是 [N_measured_dof, N_measured_dof]，通常较小
-A = full(H * H'); 
-[Q, D] = eig(A);
-d = max(diag(D), 0); % 提取特征值并确保非负 (消除机器精度的负零误差)
+    case 'uniform'
+        % ---------------------------------------------------------------
+        % 均匀压力模式：整个目标曲面只有一个压力未知量 p_uniform。
+        % pressure_virtual = p_uniform * ones(N_virtual_nodes, 1)
+        % 推荐先用此模式验证法向、面积、单位、边界和刚度矩阵。
+        % ---------------------------------------------------------------
+        uniform_pressure_basis = ...
+            ones(N_virtual_nodes, 1);
 
-% 将测点位移残差投影到特征向量空间
-u = Q' * Delta_U;
+        H_uniform = ...
+            H * uniform_pressure_basis;
 
-% 2. 生成对数分布的 lambda 候选向量
-% 依据最大特征值设定合理的搜索范围 (通常从 1e-12*d_max 到 1*d_max)
-n_lambdas = 100;
-lambda_vec = logspace(-12, 0, n_lambdas) * max(d);
-t_vec = log10(lambda_vec);
+        uniform_denominator = ...
+            H_uniform' * H_uniform;
 
-eta = zeros(1, n_lambdas); % 解的范数 ||p||
-rho = zeros(1, n_lambdas); % 残差范数 ||Hp - Delta_U||
+        if uniform_denominator <= eps
+            error([ ...
+                '均匀压力对测点位移几乎没有灵敏度。', newline, ...
+                '请检查加载曲面、测点位置、边界条件和压力方向。']);
+        end
 
-% 3. 快速计算每个 lambda 对应的 eta 和 rho (基于标量运算，无需矩阵求逆)
-for i = 1:n_lambdas
-    lam = lambda_vec(i);
+        % 一个未知量的最小二乘解。
+        p_uniform = ...
+            (H_uniform' * Delta_U) / uniform_denominator;
 
-    % 投影空间中的权重系数：u_i / (d_i + lam)
-    w = u ./ (d + lam);
+        pressure_virtual = ...
+            p_uniform * uniform_pressure_basis;
 
-    % 解的范数: ||p||^2 = \sum (d_i * w_i^2)
-    eta(i) = sqrt(sum(d .* (w.^2)));
+        lambda_opt = 0;
 
-    % 残差的范数: ||Hp - Delta_U||^2 = \sum ( (lam * u_i / (d_i + lam))^2 )
-    rho(i) = sqrt(sum( (lam .* u ./ (d + lam)).^2 ));
-end
+        fprintf('均匀压力反演结果：%.9e\n', p_uniform);
 
-% 4. 计算 L 曲线的曲率以寻找“拐点”
-% 在对数坐标下参数化，设 x = log(rho), y = log(eta)
-x = log(rho);
-y = log(eta);
+    case 'nodal'
+        % ---------------------------------------------------------------
+        % 节点压力模式：每个虚拟节点一个压力未知量。
+        % 该问题通常欠定或病态，使用 L-curve 选择 Tikhonov 参数。
+        % ---------------------------------------------------------------
+        disp('正在使用 L-curve 法寻找节点压力正则化参数...');
 
-% 离散求导计算曲率
-dx_dt = gradient(x, t_vec);
-dy_dt = gradient(y, t_vec);
-d2x_dt2 = gradient(dx_dt, t_vec);
-d2y_dt2 = gradient(dy_dt, t_vec);
+        A = full(H * H');
+        A = (A + A') / 2;
 
-% 曲率公式: k = (x'y'' - y'x'') / (x'^2 + y'^2)^(3/2)
-curvature = (dx_dt .* d2y_dt2 - dy_dt .* d2x_dt2) ./ ...
+        [Q, D] = eig(A);
+        d = max(real(diag(D)), 0);
+        d_max = max(d);
+
+        if isempty(d) || d_max <= eps
+            error('灵敏度矩阵 H 几乎为零，无法进行压力反演。');
+        end
+
+        u_projected = Q' * Delta_U;
+
+        n_lambdas = 100;
+        lambda_vec = logspace(-12, 0, n_lambdas) * d_max;
+        t_vec = log10(lambda_vec);
+
+        eta = zeros(1, n_lambdas);
+        rho = zeros(1, n_lambdas);
+
+        for i = 1:n_lambdas
+            lam = lambda_vec(i);
+            w = u_projected ./ (d + lam);
+
+            eta(i) = sqrt(sum(d .* abs(w).^2));
+            rho(i) = sqrt(sum(abs( ...
+                lam .* u_projected ./ (d + lam)).^2));
+        end
+
+        rho_safe = max(rho, eps);
+        eta_safe = max(eta, eps);
+
+        x = log(rho_safe);
+        y = log(eta_safe);
+
+        dx_dt = gradient(x, t_vec);
+        dy_dt = gradient(y, t_vec);
+        d2x_dt2 = gradient(dx_dt, t_vec);
+        d2y_dt2 = gradient(dy_dt, t_vec);
+
+        curvature = ...
+            (dx_dt .* d2y_dt2 - dy_dt .* d2x_dt2) ./ ...
             max((dx_dt.^2 + dy_dt.^2).^(1.5), eps);
 
-% 剔除两端的极值点防止由于截断造成的伪曲率峰值
-valid_idx = 5:(n_lambdas-5);
-[~, max_idx_offset] = max(curvature(valid_idx));
-opt_idx = valid_idx(max_idx_offset);
-lambda_opt = lambda_vec(opt_idx);
+        curvature_score = abs(curvature);
+        curvature_score(~isfinite(curvature_score)) = -inf;
 
-fprintf('L-curve 寻优完成，最优 lambda = %.6e\n', lambda_opt);
+        valid_idx = 5:(n_lambdas - 5);
+        [~, max_idx_offset] = ...
+            max(curvature_score(valid_idx));
 
-% 5. 绘制 L 曲线和曲率图供人工校验
-figure('Name', 'L-Curve Analysis', 'Color', 'w', 'Position', [150, 150, 1000, 400]);
+        opt_idx = valid_idx(max_idx_offset);
+        lambda_opt = lambda_vec(opt_idx);
 
-% 左图：L 曲线
-subplot(1, 2, 1);
-loglog(rho, eta, 'b-', 'LineWidth', 2); hold on;
-loglog(rho(opt_idx), eta(opt_idx), 'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
-grid on;
-xlabel('残差范数 ||Hp - \DeltaU||');
-ylabel('解的范数 ||p|| (压力大小惩罚)');
-title('L-Curve (双对数坐标)');
-legend('L曲线', sprintf('最大曲率拐点 (\\lambda = %.2e)', lambda_opt), 'Location', 'northeast');
+        fprintf('L-curve 寻优完成，最优 lambda = %.6e\n', ...
+            lambda_opt);
 
-% 右图：曲率随 lambda 的变化
-subplot(1, 2, 2);
-semilogx(lambda_vec, curvature, 'k-', 'LineWidth', 1.5); hold on;
-semilogx(lambda_opt, curvature(opt_idx), 'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
-grid on;
-xlabel('正则化参数 \lambda');
-ylabel('对数曲线曲率 \kappa');
-title('曲率随 \lambda 的变化');
-legend('曲率', '最优 \lambda 选取点');
+        figure( ...
+            'Name', 'L-Curve Analysis', ...
+            'Color', 'w', ...
+            'Position', [150, 150, 1000, 400]);
 
-% 6. 使用寻优得到的最优 lambda 重新计算最终的虚拟表面压力
-dual_matrix = A + lambda_opt * speye(N_measured_dof);
-pressure_virtual = H' * (dual_matrix \ Delta_U);
+        subplot(1, 2, 1);
+        loglog(rho_safe, eta_safe, 'b-', 'LineWidth', 2);
+        hold on;
+        loglog( ...
+            rho_safe(opt_idx), eta_safe(opt_idx), ...
+            'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
+        grid on;
+        xlabel('残差范数 ||Hp - U_m||');
+        ylabel('解的范数 ||p||');
+        title('L-Curve');
+        legend( ...
+            'L 曲线', ...
+            sprintf('选取点 (\\lambda = %.2e)', lambda_opt), ...
+            'Location', 'northeast');
 
+        subplot(1, 2, 2);
+        semilogx(lambda_vec, curvature_score, ...
+            'k-', 'LineWidth', 1.5);
+        hold on;
+        semilogx( ...
+            lambda_opt, curvature_score(opt_idx), ...
+            'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
+        grid on;
+        xlabel('正则化参数 \lambda');
+        ylabel('|曲率|');
+        title('L-Curve 曲率');
 
-%% 14. 根据重构压力计算完整位移和虚拟点位移
+        dual_matrix = ...
+            A + lambda_opt * speye(N_measured_dof);
 
-F_pressure_global = G * pressure_virtual;
-F_total_global    = F_known + F_pressure_global;
+        pressure_virtual = ...
+            H' * (dual_matrix \ Delta_U);
 
-U_reconstructed_global = K_global \ F_total_global;
+    otherwise
+        error([ ...
+            '未知 inversion_mode：', inversion_mode, newline, ...
+            '请设置为 uniform 或 nodal。']);
+end
 
-dof_virtual = reshape(dof_virtual_matrix', [], 1);
+%% 14. 根据反演压力计算完整位移和虚拟点位移
+
+F_pressure_global = ...
+    G * pressure_virtual;
+
+% 本版本没有其他已知载荷。
+F_total_global = ...
+    F_pressure_global;
+
+U_reconstructed_global = ...
+    K_global \ F_total_global;
+
+dof_virtual = reshape( ...
+    dof_virtual_matrix', [], 1);
 
 U_virtual_vector = ...
     U_reconstructed_global(dof_virtual);
@@ -844,28 +940,48 @@ U_virtual_vector = ...
 U_virtual_3D = reshape( ...
     U_virtual_vector, 3, [])';
 
-% 压力产生的三维等效节点力，仅用于检查
+% 压力产生的三维等效节点力，仅用于检查。
 F_virtual_equivalent = bsxfun( ...
     @times, force_per_unit_pressure, pressure_virtual);
 
-
-%% 15. 误差诊断
+%% 15. 误差、可辨识性和参考压力诊断
 
 U_measured_predicted = ...
     U_reconstructed_global(dof_measured);
 
-relative_displacement_error = norm( ...
-    U_measured_predicted - U_measured) / ...
+U_measured_predicted_mat = reshape( ...
+    U_measured_predicted, 3, [])';
+
+U_measured_error_mat = ...
+    U_measured_predicted_mat - U_measured_mat;
+
+relative_displacement_error = ...
+    norm(U_measured_predicted - U_measured) / ...
     max(norm(U_measured), eps);
 
-equilibrium_residual = norm( ...
-    K_global * U_reconstructed_global - F_total_global) / ...
+equilibrium_residual = ...
+    norm(K_global * U_reconstructed_global - F_total_global) / ...
     max(norm(F_total_global), eps);
+
+% 检查灵敏度矩阵的可辨识性。
+singular_values = svd(full(H), 'econ');
+
+if isempty(singular_values)
+    effective_rank = 0;
+else
+    rank_tolerance = ...
+        max(size(H)) * eps(max(singular_values));
+
+    effective_rank = ...
+        nnz(singular_values > rank_tolerance);
+end
 
 fprintf('\n');
 fprintf('================ 重构诊断 ================\n');
 fprintf('有效测点数量：%d\n', numel(id_measured));
+fprintf('测量自由度数量：%d\n', N_measured_dof);
 fprintf('虚拟压力节点数量：%d\n', N_virtual_nodes);
+fprintf('灵敏度矩阵有效秩：%d\n', effective_rank);
 fprintf('测点位移相对拟合误差：%.6e\n', ...
     relative_displacement_error);
 fprintf('全局平衡相对残差：%.6e\n', ...
@@ -873,48 +989,95 @@ fprintf('全局平衡相对残差：%.6e\n', ...
 fprintf('最小重构压力：%.6e\n', min(pressure_virtual));
 fprintf('最大重构压力：%.6e\n', max(pressure_virtual));
 fprintf('==========================================\n');
-%% 逐测点位移误差检查
 
-U_measured_predicted_mat = reshape( ...
-    U_measured_predicted, 3, [])';
-
-U_error_mat = ...
-    U_measured_predicted_mat - U_measured_mat;
-
-U_abs_error_mat = abs(U_error_mat);
-
-U_node_error_norm = vecnorm(U_error_mat, 2, 2);
-U_node_true_norm  = vecnorm(U_measured_mat, 2, 2);
-
-U_node_relative_error = ...
-    U_node_error_norm ./ max(U_node_true_norm, eps);
-
-displacement_check_table = table( ...
+% 输出每个测点的输入位移、预测位移和误差。
+measured_displacement_table = table( ...
     id_measured(:), ...
-    U_measured_mat(:,1), ...
-    U_measured_predicted_mat(:,1), ...
-    U_error_mat(:,1), ...
-    U_measured_mat(:,2), ...
-    U_measured_predicted_mat(:,2), ...
-    U_error_mat(:,2), ...
-    U_measured_mat(:,3), ...
-    U_measured_predicted_mat(:,3), ...
-    U_error_mat(:,3), ...
-    U_node_error_norm, ...
-    U_node_relative_error, ...
+    U_measured_mat(:, 1), ...
+    U_measured_predicted_mat(:, 1), ...
+    U_measured_error_mat(:, 1), ...
+    U_measured_mat(:, 2), ...
+    U_measured_predicted_mat(:, 2), ...
+    U_measured_error_mat(:, 2), ...
+    U_measured_mat(:, 3), ...
+    U_measured_predicted_mat(:, 3), ...
+    U_measured_error_mat(:, 3), ...
     'VariableNames', { ...
         'NodeID', ...
-        'U1_True', 'U1_Predicted', 'U1_Error', ...
-        'U2_True', 'U2_Predicted', 'U2_Error', ...
-        'U3_True', 'U3_Predicted', 'U3_Error', ...
-        'DisplacementErrorNorm', ...
-        'RelativeError'});
-
-disp(displacement_check_table);
+        'U1_Measured', 'U1_Predicted', 'U1_Error', ...
+        'U2_Measured', 'U2_Predicted', 'U2_Error', ...
+        'U3_Measured', 'U3_Predicted', 'U3_Error'});
 
 writetable( ...
-    displacement_check_table, ...
-    'Measured_Displacement_Check.csv');
+    measured_displacement_table, ...
+    'Measured_vs_Predicted_Displacement.csv');
+
+% 将可选的真实压力参考值映射到反演节点，只用于比较。
+pressure_reference_on_virtual = ...
+    nan(N_virtual_nodes, 1);
+
+[reference_node_exists, reference_measured_index] = ...
+    ismember(id_virtual, id_measured);
+
+reference_candidate = ...
+    reference_node_exists;
+
+pressure_reference_on_virtual(reference_candidate) = ...
+    pressure_reference( ...
+        reference_measured_index(reference_candidate));
+
+valid_pressure_reference = ...
+    isfinite(pressure_reference_on_virtual);
+
+pressure_error_on_virtual = ...
+    nan(N_virtual_nodes, 1);
+
+pressure_relative_error_on_virtual = ...
+    nan(N_virtual_nodes, 1);
+
+if any(valid_pressure_reference)
+    pressure_error_on_virtual(valid_pressure_reference) = ...
+        pressure_virtual(valid_pressure_reference) - ...
+        pressure_reference_on_virtual(valid_pressure_reference);
+
+    pressure_relative_error_on_virtual(valid_pressure_reference) = ...
+        abs(pressure_error_on_virtual(valid_pressure_reference)) ./ ...
+        max(abs(pressure_reference_on_virtual(valid_pressure_reference)), eps);
+
+    pressure_reference_rmse = sqrt(mean( ...
+        pressure_error_on_virtual(valid_pressure_reference).^2));
+
+    pressure_reference_relative_L2 = ...
+        norm(pressure_error_on_virtual(valid_pressure_reference)) / ...
+        max(norm(pressure_reference_on_virtual(valid_pressure_reference)), eps);
+
+    fprintf('\n');
+    fprintf('参考压力匹配节点数量：%d\n', ...
+        nnz(valid_pressure_reference));
+    fprintf('参考压力 RMSE：%.6e\n', ...
+        pressure_reference_rmse);
+    fprintf('参考压力相对 L2 误差：%.2f %%\n', ...
+        100 * pressure_reference_relative_L2);
+    fprintf(['注意：参考压力只用于这里的结果比较，', ...
+             '没有参与反演求解。\n']);
+
+    pressure_reference_comparison_table = table( ...
+        id_virtual(valid_pressure_reference), ...
+        pressure_reference_on_virtual(valid_pressure_reference), ...
+        pressure_virtual(valid_pressure_reference), ...
+        pressure_error_on_virtual(valid_pressure_reference), ...
+        pressure_relative_error_on_virtual(valid_pressure_reference), ...
+        'VariableNames', { ...
+            'NodeID', ...
+            'Pressure_Reference', ...
+            'Pressure_Reconstructed', ...
+            'Pressure_Error', ...
+            'Pressure_RelativeError'});
+
+    writetable( ...
+        pressure_reference_comparison_table, ...
+        'Pressure_Reference_vs_Reconstructed.csv');
+end
 
 %% 16. 输出 CSV
 
@@ -929,6 +1092,9 @@ result_table = table( ...
     virtual_normals(:, 3), ...
     virtual_areas(:), ...
     pressure_virtual(:), ...
+    pressure_reference_on_virtual(:), ...
+    pressure_error_on_virtual(:), ...
+    pressure_relative_error_on_virtual(:), ...
     U_virtual_3D(:, 1), ...
     U_virtual_3D(:, 2), ...
     U_virtual_3D(:, 3), ...
@@ -941,7 +1107,10 @@ result_table = table( ...
         'X', 'Y', 'Z', ...
         'NormalX', 'NormalY', 'NormalZ', ...
         'NodalArea', ...
-        'Pressure', ...
+        'Pressure_Reconstructed', ...
+        'Pressure_Reference', ...
+        'Pressure_Error', ...
+        'Pressure_RelativeError', ...
         'U1_Reconstructed', ...
         'U2_Reconstructed', ...
         'U3_Reconstructed', ...
@@ -951,10 +1120,9 @@ result_table = table( ...
 
 writetable( ...
     result_table, ...
-    'Curved_Surface_Pressure_Reconstruction.csv');
+    'Displacement_Based_Pressure_Reconstruction.csv');
 
-disp('结果已保存：Curved_Surface_Pressure_Reconstruction.csv');
-
+disp('结果已保存：Displacement_Based_Pressure_Reconstruction.csv');
 
 %% 17. 曲面压力点云显示
 
@@ -976,7 +1144,7 @@ view(45, 30);
 xlabel('X');
 ylabel('Y');
 zlabel('Z');
-title('曲面虚拟节点压力重构');
+title(['仅位移反演曲面压力：', inversion_mode]);
 
 cb = colorbar;
 ylabel(cb, 'Pressure');
@@ -1149,7 +1317,7 @@ end
 
 % 反演后的总活动载荷
 F_total_reconstructed = ...
-    F_known + G * pressure_virtual;
+    G * pressure_virtual;
 
 % 反演载荷产生的全部活动自由度位移
 U_full_reconstructed = ...
@@ -1284,5 +1452,369 @@ for component_index = 1:3
         'Resolution', 300);
 end
 
+fprintf('\n========== 均匀压力数量级诊断 ==========\n');
+
+fprintf('测点输入位移最小值：%.6e\n', ...
+    min(U_measured));
+
+fprintf('测点输入位移最大值：%.6e\n', ...
+    max(U_measured));
+
+fprintf('测点输入位移范数：%.6e\n', ...
+    norm(U_measured));
+
+fprintf('单位均匀压力产生的测点位移最小值：%.6e\n', ...
+    min(H_uniform));
+
+fprintf('单位均匀压力产生的测点位移最大值：%.6e\n', ...
+    max(H_uniform));
+
+fprintf('单位均匀压力产生的测点位移范数：%.6e\n', ...
+    norm(H_uniform));
+
+fprintf('位移投影分子 H_uniform''*U：%.6e\n', ...
+    H_uniform' * U_measured);
+
+fprintf('灵敏度平方 H_uniform''*H_uniform：%.6e\n', ...
+    H_uniform' * H_uniform);
+
+fprintf('反演均匀压力：%.6e\n', ...
+    p_uniform);
+
+fprintf('=========================================\n');
+
+U_predicted_uniform = ...
+    H_uniform * p_uniform;
+
+uniform_relative_error = ...
+    norm(U_predicted_uniform - U_measured) / ...
+    max(norm(U_measured), eps);
+
+uniform_cosine_similarity = ...
+    dot(U_predicted_uniform, U_measured) / ...
+    max(norm(U_predicted_uniform) * ...
+        norm(U_measured), eps);
+
+fprintf('均匀压力预测位移范数：%.6e\n', ...
+    norm(U_predicted_uniform));
+
+fprintf('均匀压力位移相对误差：%.2f %%\n', ...
+    100 * uniform_relative_error);
+
+fprintf('预测与测量位移余弦相似度：%.6f\n', ...
+    uniform_cosine_similarity);
+%% 检查测量位移与单位压力响应的分量对应关系
+
+U_measured_3D = reshape( ...
+    U_measured, 3, [])';
+
+H_uniform_3D = reshape( ...
+    H_uniform, 3, [])';
+
+%% 枚举检查轴交换和方向反转
+
+axis_permutations = perms(1:3);
+
+best_cosine = -inf;
+best_error = inf;
+best_permutation = [];
+best_signs = [];
+best_pressure = NaN;
+best_U_transformed = [];
+
+for permutation_index = 1:size(axis_permutations,1)
+
+    current_permutation = ...
+        axis_permutations(permutation_index,:);
+
+    for sign_1 = [-1, 1]
+        for sign_2 = [-1, 1]
+            for sign_3 = [-1, 1]
+
+                current_signs = ...
+                    [sign_1, sign_2, sign_3];
+
+                % 将测量位移重新排列并改变方向
+                U_test = ...
+                    U_measured_3D(:,current_permutation);
+
+                U_test = ...
+                    U_test .* current_signs;
+
+                % 当前坐标变换下的最佳均匀压力比例
+                p_test = ...
+                    sum(H_uniform_3D(:) .* U_test(:)) / ...
+                    max(sum(H_uniform_3D(:).^2), eps);
+
+                U_test_predicted = ...
+                    p_test * H_uniform_3D;
+
+                cosine_test = ...
+                    sum(U_test_predicted(:) .* U_test(:)) / ...
+                    max(norm(U_test_predicted(:)) * ...
+                        norm(U_test(:)), eps);
+
+                error_test = ...
+                    norm(U_test_predicted - U_test, 'fro') / ...
+                    max(norm(U_test, 'fro'), eps);
+
+                if cosine_test > best_cosine
+
+                    best_cosine = cosine_test;
+                    best_error = error_test;
+                    best_permutation = current_permutation;
+                    best_signs = current_signs;
+                    best_pressure = p_test;
+                    best_U_transformed = U_test;
+
+                end
+            end
+        end
+    end
+end
+
+fprintf('\n');
+fprintf('========== 轴交换与方向反转检查 ==========\n');
+
+fprintf('最佳列排列：[%d %d %d]\n', ...
+    best_permutation(1), ...
+    best_permutation(2), ...
+    best_permutation(3));
+
+fprintf('最佳方向符号：[%+d %+d %+d]\n', ...
+    best_signs(1), ...
+    best_signs(2), ...
+    best_signs(3));
+
+fprintf('最佳拟合压力：%.6e\n', ...
+    best_pressure);
+
+fprintf('变换后余弦相似度：%.6f\n', ...
+    best_cosine);
+
+fprintf('变换后相对误差：%.2f %%\n', ...
+    100 * best_error);
+
+fprintf('==========================================\n');
 
 
+
+
+
+component_correlation = zeros(3, 3);
+component_best_scale  = zeros(3, 3);
+
+for measured_component = 1:3
+
+    u_component = ...
+        U_measured_3D(:, measured_component);
+
+    for predicted_component = 1:3
+
+        h_component = ...
+            H_uniform_3D(:, predicted_component);
+
+        % 余弦相似度
+        component_correlation( ...
+            measured_component, ...
+            predicted_component) = ...
+            dot(u_component, h_component) / ...
+            max(norm(u_component) * ...
+                norm(h_component), eps);
+
+        % 最佳比例：
+        % u_component ≈ scale * h_component
+        component_best_scale( ...
+            measured_component, ...
+            predicted_component) = ...
+            dot(h_component, u_component) / ...
+            max(dot(h_component, h_component), eps);
+    end
+end
+
+fprintf('\n');
+fprintf('========== 位移分量对应关系检查 ==========\n');
+fprintf('相关系数矩阵：\n');
+fprintf('行 = 测量 U1/U2/U3，列 = 预测 U1/U2/U3\n');
+disp(component_correlation);
+
+fprintf('各分量最佳拟合压力系数：\n');
+fprintf('行 = 测量 U1/U2/U3，列 = 预测 U1/U2/U3\n');
+disp(component_best_scale);
+
+fprintf('测量位移各分量范数：\n');
+disp(vecnorm(U_measured_3D, 2, 1));
+
+fprintf('单位压力响应各分量范数：\n');
+disp(vecnorm(H_uniform_3D, 2, 1));
+
+fprintf('==========================================\n');
+
+%% 检查测量位移与预测位移是否存在整体坐标系旋转
+
+% U_measured_3D：测量位移，尺寸 N×3
+% H_uniform_3D：单位均匀压力产生的位移，尺寸 N×3
+
+cross_matrix = ...
+    H_uniform_3D' * U_measured_3D;
+
+[rotation_U, ~, rotation_V] = ...
+    svd(cross_matrix);
+
+% 构造不含镜像的正交旋转矩阵
+rotation_correction = eye(3);
+rotation_correction(3,3) = ...
+    sign(det(rotation_U * rotation_V'));
+
+rotation_matrix = ...
+    rotation_U * rotation_correction * rotation_V';
+
+% 把预测位移旋转到测量坐标系
+H_uniform_rotated = ...
+    H_uniform_3D * rotation_matrix;
+
+% 旋转后最优统一压力
+p_after_rotation = ...
+    sum(H_uniform_rotated(:) .* U_measured_3D(:)) / ...
+    max(sum(H_uniform_rotated(:).^2), eps);
+
+% 旋转并缩放后的预测位移
+U_predicted_after_rotation = ...
+    p_after_rotation * H_uniform_rotated;
+
+rotation_relative_error = ...
+    norm(U_predicted_after_rotation - U_measured_3D, 'fro') / ...
+    max(norm(U_measured_3D, 'fro'), eps);
+
+rotation_cosine_similarity = ...
+    sum(U_predicted_after_rotation(:) .* U_measured_3D(:)) / ...
+    max(norm(U_predicted_after_rotation(:)) * ...
+        norm(U_measured_3D(:)), eps);
+
+fprintf('\n');
+fprintf('========== 整体坐标旋转检查 ==========\n');
+
+fprintf('最优旋转矩阵：\n');
+disp(rotation_matrix);
+
+fprintf('旋转矩阵行列式：%.6f\n', ...
+    det(rotation_matrix));
+
+fprintf('旋转后的最优均匀压力：%.6e\n', ...
+    p_after_rotation);
+
+fprintf('旋转后的预测位移范数：%.6e\n', ...
+    norm(U_predicted_after_rotation, 'fro'));
+
+fprintf('旋转后的位移相对误差：%.2f %%\n', ...
+    100 * rotation_relative_error);
+
+fprintf('旋转后的余弦相似度：%.6f\n', ...
+    rotation_cosine_similarity);
+
+fprintf('======================================\n');
+
+%% 检查节点位移模长是否一致
+% 位移模长不受坐标系旋转影响
+
+U_measured_magnitude = ...
+    vecnorm(U_measured_3D, 2, 2);
+
+H_uniform_magnitude = ...
+    vecnorm(H_uniform_3D, 2, 2);
+
+% 模长之间的相关系数
+magnitude_corr_matrix = ...
+    corrcoef(U_measured_magnitude, H_uniform_magnitude);
+
+if size(magnitude_corr_matrix, 1) == 2
+    magnitude_correlation = ...
+        magnitude_corr_matrix(1,2);
+else
+    magnitude_correlation = NaN;
+end
+
+% 使用模长单独拟合一个压力比例
+p_magnitude = ...
+    dot(H_uniform_magnitude, U_measured_magnitude) / ...
+    max(dot(H_uniform_magnitude, H_uniform_magnitude), eps);
+
+U_magnitude_predicted = ...
+    p_magnitude * H_uniform_magnitude;
+
+magnitude_relative_error = ...
+    norm(U_magnitude_predicted - U_measured_magnitude) / ...
+    max(norm(U_measured_magnitude), eps);
+
+fprintf('\n');
+fprintf('========== 位移模长检查 ==========\n');
+
+fprintf('真实测点位移模长范围：[%.6e, %.6e]\n', ...
+    min(U_measured_magnitude), ...
+    max(U_measured_magnitude));
+
+fprintf('单位压力响应模长范围：[%.6e, %.6e]\n', ...
+    min(H_uniform_magnitude), ...
+    max(H_uniform_magnitude));
+
+fprintf('位移模长相关系数：%.6f\n', ...
+    magnitude_correlation);
+
+fprintf('基于位移模长拟合的压力：%.6e\n', ...
+    p_magnitude);
+
+fprintf('位移模长相对拟合误差：%.2f %%\n', ...
+    100 * magnitude_relative_error);
+
+fprintf('==================================\n');
+
+magnitude_table = table( ...
+    id_measured(:), ...
+    U_measured_magnitude, ...
+    H_uniform_magnitude, ...
+    U_magnitude_predicted, ...
+    'VariableNames', { ...
+        'NodeID', ...
+        'MeasuredDisplacementMagnitude', ...
+        'UnitPressureDisplacementMagnitude', ...
+        'FittedDisplacementMagnitude'});
+
+writetable( ...
+    magnitude_table, ...
+    'Displacement_Magnitude_Check.csv');
+
+%% 压力单位数量级检查
+
+pressure_rms_raw = ...
+    sqrt(mean(pressure_true.^2));
+
+fprintf('\n');
+fprintf('========== 压力单位数量级检查 ==========\n');
+
+fprintf('原始压力平均值：%.6e\n', ...
+    mean(pressure_true));
+
+fprintf('原始压力绝对值平均值：%.6e\n', ...
+    mean(abs(pressure_true)));
+
+fprintf('原始压力 RMS：%.6e\n', ...
+    pressure_rms_raw);
+
+fprintf('\n假设原始数据单位为 kPa：\n');
+fprintf('换算为 MPa 后平均值：%.6e\n', ...
+    mean(pressure_true) / 1000);
+
+fprintf('换算为 MPa 后绝对值平均值：%.6e\n', ...
+    mean(abs(pressure_true)) / 1000);
+
+fprintf('换算为 MPa 后 RMS：%.6e\n', ...
+    pressure_rms_raw / 1000);
+
+fprintf('\n假设原始数据单位为 Pa：\n');
+fprintf('换算为 MPa 后 RMS：%.6e\n', ...
+    pressure_rms_raw / 1e6);
+
+fprintf('\n位移模长拟合出的等效压力：%.6e\n', ...
+    p_magnitude);
+
+fprintf('========================================\n');
