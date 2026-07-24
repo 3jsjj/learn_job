@@ -21,7 +21,7 @@ inp_filepath = 'Zhimian_addnodes_cut.inp';
 
 % 至少包含四列：NodeID, U1, U2, U3。
 % 若后面还有其他列，本程序会自动忽略。
-measured_filepath = 'Abaqus_Nodal_U.csv';
+measured_filepath = 'Abaqus_Nodal_U_and_Pressure.csv';
 
 % 可选：固定边界 NodeID 文件。固定节点作为 U1=U2=U3=0 的插值锚点。
 fixed_filepath = 'fixed_nodes.csv';
