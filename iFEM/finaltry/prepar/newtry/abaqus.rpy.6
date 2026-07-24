@@ -2,7 +2,7 @@
 #
 # Abaqus/CAE Release 2025 replay file
 # Internal Version: 2024_09_20-21.00.46 RELr427 198590
-# Run by 13104 on Thu Jul 23 16:55:37 2026
+# Run by 13104 on Fri Jul 24 11:24:24 2026
 #
 
 # from driverUtils import executeOnCaeGraphicsStartup
@@ -15,8 +15,9 @@ session.Viewport(name='Viewport: 1', origin=(1.16602, 1.16667), width=171.637,
 session.viewports['Viewport: 1'].makeCurrent()
 from driverUtils import executeOnCaeStartup
 executeOnCaeStartup()
-execfile('./get_pressure.py', __main__.__dict__)
-#: ???? ODB ??: Cannot open file D:/test/iFEM/finaltry/prepar/newtry/job-4.odb. *** ERROR: No such file: D:/test/iFEM/finaltry/prepar/newtry/job-4.odb.
+execfile('./export_nodal_u_ur.py', __main__.__dict__)
+#: ???????
+#: ??? ODB ???Job-1.odb
 #* Exit code: 0
-#* File "./get_pressure.py", line 21, in <module>
-#*     sys.exit()
+#* File "./export_nodal_u_ur.py", line 319, in <module>
+#*     sys.exit(1)

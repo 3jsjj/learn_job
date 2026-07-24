@@ -2,7 +2,7 @@
 #
 # Abaqus/CAE Release 2025 replay file
 # Internal Version: 2024_09_20-21.00.46 RELr427 198590
-# Run by 13104 on Fri Jul 24 10:31:59 2026
+# Run by 13104 on Fri Jul 24 11:27:10 2026
 #
 
 # from driverUtils import executeOnCaeGraphicsStartup
@@ -15,7 +15,7 @@ session.Viewport(name='Viewport: 1', origin=(1.16602, 1.16667), width=171.637,
 session.viewports['Viewport: 1'].makeCurrent()
 from driverUtils import executeOnCaeStartup
 executeOnCaeStartup()
-execfile('./get_RF.py', __main__.__dict__)
+execfile('./export_nodal_u_ur.py', __main__.__dict__)
 #: Model: D:/test/iFEM/finaltry/prepar/newtry/job-4.odb
 #: Number of Assemblies:         1
 #: Number of Assembly instances: 0
@@ -24,19 +24,18 @@ execfile('./get_RF.py', __main__.__dict__)
 #: Number of Element Sets:       1
 #: Number of Node Sets:          1
 #: Number of Steps:              1
-#: ???? ODB?job-4.odb
+#: ========== ODB ???????? ==========
+#: ODB:D:\test\iFEM\finaltry\prepar\newtry\job-4.odb
 #: ????Step-1
 #: ????-1
-#: ????1.000000000e+00
-#: ========== ?????? ==========
-#: ???????120
-#: ?????????120
-#: ?? RF ????????120
-#: ????????
-#: RF1 = +0.000000000000e+00
-#: RF2 = +0.000000000000e+00
-#: RF3 = +0.000000000000e+00
-#: ???????Abaqus_All_Surface_Displacement.csv
-#: ==================================
+#: ???1.000000000000e+00
+#: ???PART-1-1
+#: ???????157
+#: U ??????157
+#: U ???6??????0
+#: ?? UR ??????157
+#: ?????157
+#: ?????D:\test\iFEM\finaltry\prepar\newtry\Abaqus_All_Nodal_U_UR.csv
+#: ==========================================
 print('RT script done')
 #: RT script done
